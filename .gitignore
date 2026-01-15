@@ -1,0 +1,19 @@
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+dist/
+client
+server
+
+# Logs
+*.log
+
+# Project specific
+Secure Censorship-Resistant UDP Tunnel.txt
+TODO.md
+
+# Editor
+.vscode/
+.idea/

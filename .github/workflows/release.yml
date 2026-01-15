@@ -1,0 +1,62 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [linux, windows, darwin]
+        goarch: [amd64, arm64]
+        exclude:
+          - goos: windows
+            goarch: arm64
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.22'
+
+    - name: Build
+      run: |
+        mkdir -p dist
+        GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o dist/client-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/client
+        GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o dist/server-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/server
+        if [ "${{ matrix.goos }}" = "windows" ]; then
+          mv dist/client-${{ matrix.goos }}-${{ matrix.goarch }} dist/client-${{ matrix.goos }}-${{ matrix.goarch }}.exe
+          mv dist/server-${{ matrix.goos }}-${{ matrix.goarch }} dist/server-${{ matrix.goos }}-${{ matrix.goarch }}.exe
+        fi
+
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: binaries-${{ matrix.goos }}-${{ matrix.goarch }}
+        path: dist/*
+
+  create-release:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download Artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+
+    - name: Display structure of downloaded files
+      run: ls -R artifacts
+
+    - name: Release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: artifacts/**/*
