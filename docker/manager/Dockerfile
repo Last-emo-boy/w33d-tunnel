@@ -1,4 +1,4 @@
-FROM golang:alpine AS build
+FROM m.daocloud.io/docker.io/library/golang:alpine AS build
 ENV GOPROXY=https://goproxy.cn,direct
 WORKDIR /app
 COPY go.mod go.sum ./
@@ -8,7 +8,7 @@ COPY . .
 ENV CGO_ENABLED=0
 RUN go build -o manager cmd/manager/main.go
 
-FROM alpine:latest
+FROM m.daocloud.io/docker.io/library/alpine:latest
 WORKDIR /root/
 COPY --from=build /app/manager .
 EXPOSE 2933
