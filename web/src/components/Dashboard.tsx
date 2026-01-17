@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { listUsers, createUser } from '../api';
-import { Copy, Plus, RefreshCw, UserPlus } from 'lucide-react';
+import { listUsers, createUser, listNodes } from '../api';
+import { Copy, Plus, RefreshCw, UserPlus, Server } from 'lucide-react';
 
 interface User {
   id: number;
@@ -10,8 +10,16 @@ interface User {
   quota_bytes: number;
 }
 
+interface Node {
+  id: string;
+  name: string;
+  addr: string;
+  last_seen: string;
+}
+
 export default function Dashboard() {
   const [users, setUsers] = useState<User[]>([]);
+  const [nodes, setNodes] = useState<Node[]>([]);
   const [loading, setLoading] = useState(false);
   
   // New User Form
@@ -19,11 +27,12 @@ export default function Dashboard() {
   const [quota, setQuota] = useState(10);
   const [showModal, setShowModal] = useState(false);
 
-  const fetchUsers = async () => {
+  const fetchData = async () => {
     setLoading(true);
     try {
-      const data = await listUsers();
-      setUsers(data);
+      const [uData, nData] = await Promise.all([listUsers(), listNodes()]);
+      setUsers(uData);
+      setNodes(nData);
     } catch (err) {
       console.error(err);
     } finally {
@@ -32,7 +41,7 @@ export default function Dashboard() {
   };
 
   useEffect(() => {
-    fetchUsers();
+    fetchData();
   }, []);
 
   const handleCreate = async (e: React.FormEvent) => {
@@ -41,15 +50,13 @@ export default function Dashboard() {
       await createUser(username, quota);
       setShowModal(false);
       setUsername('');
-      fetchUsers();
+      fetchData();
     } catch (err) {
       alert('Failed to create user');
     }
   };
 
   const getSubLink = (token: string) => {
-    // Assuming API is on same host/port in production (via Nginx)
-    // Or configurable.
     const baseUrl = window.location.origin;
     return `${baseUrl}/api/subscribe?token=${token}`;
   };
@@ -58,17 +65,60 @@ export default function Dashboard() {
     navigator.clipboard.writeText(text);
     alert('Copied!');
   };
+  
+  const isOnline = (lastSeen: string) => {
+    const diff = new Date().getTime() - new Date(lastSeen).getTime();
+    return diff < 120000; // 2 minutes
+  };
 
   return (
     <div className="min-h-screen bg-gray-900 text-white p-8">
       <div className="max-w-6xl mx-auto">
+        {/* Nodes Section */}
+        <div className="mb-12">
+          <div className="flex justify-between items-center mb-6">
+            <h1 className="text-3xl font-bold flex items-center gap-2">
+              <Server /> Tunnel Nodes
+            </h1>
+            <button onClick={fetchData} className="p-2 bg-gray-700 rounded hover:bg-gray-600">
+              <RefreshCw size={20} />
+            </button>
+          </div>
+          
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {nodes.map(node => (
+              <div key={node.id} className="bg-gray-800 p-6 rounded-lg border border-gray-700">
+                <div className="flex justify-between items-start mb-4">
+                  <h3 className="text-xl font-bold">{node.name}</h3>
+                  <span className={`px-2 py-1 rounded text-xs ${isOnline(node.last_seen) ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300'}`}>
+                    {isOnline(node.last_seen) ? 'Online' : 'Offline'}
+                  </span>
+                </div>
+                <div className="space-y-2 text-gray-400 text-sm">
+                  <p>ID: <span className="text-white">{node.id}</span></p>
+                  <p>Addr: <span className="text-white">{node.addr}</span></p>
+                  <p>Last Seen: {new Date(node.last_seen).toLocaleString()}</p>
+                </div>
+              </div>
+            ))}
+            {nodes.length === 0 && !loading && (
+              <div className="text-gray-500 col-span-full text-center py-8 bg-gray-800 rounded">
+                No nodes registered yet. Run a server with -manager flag.
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Users Section */}
         <div className="flex justify-between items-center mb-8">
-          <h1 className="text-3xl font-bold">Tenant Management</h1>
+          <h1 className="text-3xl font-bold flex items-center gap-2">
+            <UserPlus /> Tenants
+          </h1>
           <button
             onClick={() => setShowModal(true)}
             className="flex items-center gap-2 bg-green-600 px-4 py-2 rounded hover:bg-green-500"
           >
-            <UserPlus size={20} /> Add Tenant
+             Add Tenant
           </button>
         </div>
 

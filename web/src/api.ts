@@ -1,6 +1,7 @@
 import axios from 'axios';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000/api';
+// Use relative path to allow Nginx to proxy it correctly on any port
+const API_URL = import.meta.env.VITE_API_URL || '/api';
 
 const api = axios.create({
   baseURL: API_URL,
@@ -29,6 +30,11 @@ export const listUsers = async () => {
 
 export const createUser = async (username: string, quotaGB: number) => {
   const res = await api.post('/admin/users', { username, quota_gb: quotaGB });
+  return res.data;
+};
+
+export const listNodes = async () => {
+  const res = await api.get('/nodes');
   return res.data;
 };
 

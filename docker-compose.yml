@@ -6,7 +6,7 @@ services:
       context: .
       dockerfile: docker/manager/Dockerfile
     ports:
-      - "3000:3000"
+      - "2933:2933"
     volumes:
       - ./data:/root/data
     restart: always
@@ -16,7 +16,7 @@ services:
       context: ./web
       dockerfile: Dockerfile
     ports:
-      - "80:80"
+      - "7729:7729"
     depends_on:
       - manager
     restart: always
