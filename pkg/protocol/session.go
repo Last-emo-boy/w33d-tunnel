@@ -42,6 +42,8 @@ type Session struct {
 	EphemeralPub     []byte
 	PeerEphemeralPub []byte
 
+	PresharedKey  []byte
+
 	// Session Keys (Read-only after handshake)
 	SendKey       []byte
 	RecvKey       []byte
@@ -62,6 +64,15 @@ type Session struct {
 	RemoteAddr net.Addr
 	LastActive time.Time
 	
+	// FEC
+	FECEncoder interface{
+		Encode(packet []byte) ([][]byte, error)
+	}
+	FECDecoder interface{
+		HandlePacket(packet []byte, header Header) ([][]byte, error)
+	}
+	FECSeq     uint64
+
 	// Tenant Info
 	Token string
 	// Traffic Stats

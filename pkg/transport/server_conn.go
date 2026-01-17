@@ -1,9 +1,10 @@
 package transport
 
 import (
+	"encoding/binary"
 	"errors"
-	"net"
 	"math/rand"
+	"net"
 	"sync"
 	"time"
 	"w33d-tunnel/pkg/protocol"
@@ -67,6 +68,13 @@ func (sm *SessionManager) CreateSession(addr net.Addr) *protocol.Session {
 	// Create new server session (Client Key unknown yet, will be set during Handshake)
 	sess := protocol.NewSession(protocol.RoleServer, sm.serverPriv, nil)
 	sess.RemoteAddr = addr
+	
+	// Initialize FEC
+	enc, _ := NewFECEncoder()
+	dec, _ := NewFECDecoder()
+	sess.FECEncoder = enc
+	sess.FECDecoder = dec
+	
 	sm.sessions[addr.String()] = sess
 	return sess
 }
@@ -144,7 +152,7 @@ func (s *ServerObfuscatedPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, e
 			}
 		}
 		
-		// Session Established. Decrypt.
+	// Session Established. Decrypt.
 		pkt, _, err := sess.DecryptPacket(rawPkt, 65535)
 		if err != nil {
 			// Decrypt failed. Drop.
@@ -153,15 +161,66 @@ func (s *ServerObfuscatedPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, e
 		}
 		
 		s.manager.AddStats(sess, uint64(len(rawPkt)), uint64(len(pkt.Payload)))
+
+		// 2. Handle FEC
+		// If it's a FEC Parity packet, it will be handled by FECDecoder.
+		// If it's a Data packet, it will be returned.
+		// We might also get Recovered packets if a loss was detected and recovered.
+		
+		// Unwrap the payload to get FEC Group/Index.
+		// [Group(8)][Index(1)][Content]
+		if len(pkt.Payload) < 9 {
+			// Invalid payload
+			PutBuffer2K(buf)
+			continue
+		}
+		
+		recovered, err := sess.FECDecoder.HandlePacket(pkt.Payload, pkt.Header)
+		if err != nil {
+			PutBuffer2K(buf)
+			continue
+		}
+		
+		if (pkt.Header.Flags & protocol.FlagFEC) != 0 {
+			// Parity Packet. Consumed.
+			// If recovered packets available, return one.
+			// TODO: Handle multiple recovered packets (need queue).
+			// For now, return the first one.
+			if len(recovered) > 0 {
+				recPkt := recovered[0]
+				if len(recPkt) < 9 {
+					PutBuffer2K(buf)
+					continue
+				}
+				data := recPkt[9:]
+				if len(data) > len(p) {
+					PutBuffer2K(buf)
+					return 0, addr, errors.New("buffer too small")
+				}
+				copy(p, data)
+				PutBuffer2K(buf)
+				return len(data), addr, nil
+			}
+			
+			PutBuffer2K(buf)
+			continue
+		}
+
+		// Data Packet
+		// Unwrap and return
+		// We assume that HandlePacket processed it (stored for potential recovery)
+		// but we still need to deliver it immediately.
+		
+		realPayload := pkt.Payload[9:]
 	
-	// Copy payload (QUIC packet) to p
-	if len(pkt.Payload) > len(p) {
+		// Copy payload (QUIC packet) to p
+		if len(realPayload) > len(p) {
+			PutBuffer2K(buf)
+			return 0, addr, errors.New("buffer too small")
+		}
+		copy(p, realPayload)
 		PutBuffer2K(buf)
-		return 0, addr, errors.New("buffer too small")
-	}
-	copy(p, pkt.Payload)
-	PutBuffer2K(buf)
-	return len(pkt.Payload), addr, nil
+		return len(realPayload), addr, nil
 	}
 }
 
@@ -174,36 +233,76 @@ func (s *ServerObfuscatedPacketConn) WriteTo(p []byte, addr net.Addr) (n int, er
 		return 0, errors.New("no session")
 	}
 	
-	// Encrypt
-	// ... (Implementation detail: WriteTo should call session.Encrypt)
-	// But current WriteTo implementation handles encryption internally?
-	// Let's check existing WriteTo.
-	// Oh wait, ServerObfuscatedPacketConn doesn't implement WriteTo in full detail in my memory?
-	// Let's Read it first.
 	return s.writeToInternal(p, addr, sess)
 }
 
 func (s *ServerObfuscatedPacketConn) writeToInternal(p []byte, addr net.Addr, sess *protocol.Session) (n int, err error) {
-	// Encrypt Packet
-	// Sequence management is inside EncryptPacket? No.
+	// Use FEC Encoder
 	
-	seq := sess.IncrementSendSeq()
-	encrypted, err := sess.EncryptPacket(p, seq)
+	fecSeq := sess.FECSeq
+	sess.FECSeq++
+	
+	group := fecSeq / uint64(FECDataShards)
+	index := int(fecSeq) % int(FECDataShards)
+	
+	// 1. Feed RAW payload to FEC Encoder
+	parityShards, err := sess.FECEncoder.Encode(p)
 	if err != nil {
 		return 0, err
 	}
+	
+	// 2. Send Data Packet (Wrapped)
+	if err := s.sendWrapped(p, group, byte(index), addr, protocol.FlagData, sess); err != nil {
+		return 0, err
+	}
+	
+	// 3. Send Parity if any
+	if parityShards != nil {
+		for i, shard := range parityShards {
+			// Parity Index starts at 10
+			pIndex := byte(FECDataShards + i)
+			if err := s.sendWrapped(shard, group, pIndex, addr, protocol.FlagFEC, sess); err != nil {
+				// Ignore
+			}
+			PutBuffer2K(shard)
+		}
+	}
+	
+	return len(p), nil
+}
+
+func (s *ServerObfuscatedPacketConn) sendWrapped(p []byte, group uint64, index byte, addr net.Addr, flags uint8, sess *protocol.Session) error {
+	wrapped := GetBuffer2K()
+	if len(p) + 9 > cap(wrapped) {
+		wrapped = make([]byte, len(p)+9)
+	} else {
+		wrapped = wrapped[:len(p)+9]
+	}
+	
+	binary.BigEndian.PutUint64(wrapped[0:8], group)
+	wrapped[8] = index
+	copy(wrapped[9:], p)
+	
+	// Encrypt Packet
+	seq := sess.IncrementSendSeq()
+	encrypted, err := sess.EncryptPacket(wrapped, seq)
+	if err != nil {
+		PutBuffer2K(wrapped)
+		return err
+	}
+	PutBuffer2K(wrapped) // Done with plaintext wrapper
 	
 	// Add Fake Header
 	finalPkt := AddFakeHeader(encrypted, FakeHeaderRTP)
 	
 	if udpAddr, ok := addr.(*net.UDPAddr); ok {
-		n, err = s.conn.WriteToUDP(finalPkt, udpAddr)
+		n, err := s.conn.WriteToUDP(finalPkt, udpAddr)
 		if err == nil {
 			s.manager.AddStats(sess, 0, uint64(n)) // Account wire bytes
 		}
-		return len(p), err // Return payload length to QUIC
+		return err
 	}
-	return 0, net.ErrWriteToConnected
+	return net.ErrWriteToConnected
 }
 
 // AddStats helper

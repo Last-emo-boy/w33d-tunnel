@@ -1,6 +1,7 @@
 package logger
 
 import (
+	"fmt"
 	"log"
 	"os"
 )
@@ -15,36 +16,45 @@ const (
 
 var currentLevel = LevelInfo
 var logger = log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)
+var outputCallback func(string)
 
-// SetLevel sets the global log level.
-func SetLevel(level int) {
-	currentLevel = level
+// SetOutputCallback sets a callback function to receive log messages.
+func SetOutputCallback(callback func(string)) {
+	outputCallback = callback
+}
+
+func logMsg(prefix, format string, v ...interface{}) {
+	msg := fmt.Sprintf(prefix+format, v...)
+	logger.Print(msg)
+	if outputCallback != nil {
+		outputCallback(msg)
+	}
 }
 
 // Debug logs debug messages.
 func Debug(format string, v ...interface{}) {
 	if currentLevel <= LevelDebug {
-		logger.Printf("[DEBUG] "+format, v...)
+		logMsg("[DEBUG] ", format, v...)
 	}
 }
 
 // Info logs info messages.
 func Info(format string, v ...interface{}) {
 	if currentLevel <= LevelInfo {
-		logger.Printf("[INFO]  "+format, v...)
+		logMsg("[INFO]  ", format, v...)
 	}
 }
 
 // Warn logs warning messages.
 func Warn(format string, v ...interface{}) {
 	if currentLevel <= LevelWarn {
-		logger.Printf("[WARN]  "+format, v...)
+		logMsg("[WARN]  ", format, v...)
 	}
 }
 
 // Error logs error messages.
 func Error(format string, v ...interface{}) {
 	if currentLevel <= LevelError {
-		logger.Printf("[ERROR] "+format, v...)
+		logMsg("[ERROR] ", format, v...)
 	}
 }

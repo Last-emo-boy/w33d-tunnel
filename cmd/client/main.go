@@ -84,12 +84,33 @@ func main() {
 			os.Exit(1)
 		}
 		
-		// Pick first node
-		node := config.Nodes[0]
-		*serverAddr = node.Addr
-		*serverPubStr = node.PubKey
+			// Pick first valid node
+		var selectedNode *struct {
+			Addr   string `json:"addr"`
+			PubKey string `json:"pub_key"`
+		}
+
+		for _, n := range config.Nodes {
+			// Validate PubKey
+			if _, err := hex.DecodeString(n.PubKey); err == nil && len(n.PubKey) > 0 {
+				selectedNode = &n
+				break
+			} else {
+				logger.Warn("Skipping node with invalid pubkey: %s", n.Addr)
+			}
+		}
+
+		if selectedNode == nil {
+			logger.Error("No valid nodes found in subscription")
+			os.Exit(1)
+		}
 		
-		// Extract token from URL if not provided?
+		*serverAddr = selectedNode.Addr
+		*serverPubStr = selectedNode.PubKey
+		
+		logger.Info("Selected Node: %s (Pub: %s...)", selectedNode.Addr, selectedNode.PubKey[:8])
+
+	// Extract token from URL if not provided?
 		// Usually token is part of URL query `?token=...`
 		// We need to pass this token to the handshake too?
 		// Yes, handshake requires token.

@@ -42,6 +42,16 @@ func startPingServer(port int) {
 	http.ListenAndServe(fmt.Sprintf(":%d", port), nil)
 }
 
+func getPublicIP() string {
+	resp, err := http.Get("https://api.ipify.org")
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	ip, _ := io.ReadAll(resp.Body)
+	return string(ip)
+}
+
 func registerToManager(pub []byte) {
 	// Construct Payload
 	// We need our public address. For now, assume localhost or config.
@@ -49,7 +59,17 @@ func registerToManager(pub []byte) {
 	
 	addr := *advertised
 	if addr == "" {
-		addr = fmt.Sprintf("127.0.0.1:%d", *port)
+		// Try to auto-discover public IP
+		publicIP := getPublicIP()
+		if publicIP != "" {
+			addr = fmt.Sprintf("%s:%d", publicIP, *port)
+			logger.Info("Auto-discovered Public IP: %s -> %s", publicIP, addr)
+		} else {
+			addr = fmt.Sprintf("127.0.0.1:%d", *port)
+			logger.Warn("Could not determine public IP, using localhost: %s", addr)
+		}
+	} else {
+		logger.Info("Using configured Advertised Address: %s", addr)
 	}
 
 	payload := map[string]string{
@@ -61,14 +81,32 @@ func registerToManager(pub []byte) {
 	
 	jsonData, _ := json.Marshal(payload)
 	
+	// Helper to send request
+	send := func() {
+		logger.Info("Registering node to Manager: %s", *managerAddr+"/api/register_node")
+		resp, err := http.Post(*managerAddr+"/api/register_node", "application/json", bytes.NewBuffer(jsonData))
+		if err != nil {
+			logger.Error("Registration failed: %v", err)
+			return
+		}
+		defer resp.Body.Close()
+		
+		if resp.StatusCode != 200 {
+			body, _ := io.ReadAll(resp.Body)
+			logger.Error("Registration returned status %d: %s", resp.StatusCode, string(body))
+		} else {
+			logger.Info("Node registered successfully.")
+		}
+	}
+
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 	
 	// Initial
-	http.Post(*managerAddr+"/api/register_node", "application/json", bytes.NewBuffer(jsonData))
+	send()
 	
 	for range ticker.C {
-		http.Post(*managerAddr+"/api/register_node", "application/json", bytes.NewBuffer(jsonData))
+		send()
 	}
 }
 
