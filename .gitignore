@@ -4,8 +4,8 @@
 *.so
 *.dylib
 dist/
-client
-server
+/client
+/server
 
 # Logs
 *.log
