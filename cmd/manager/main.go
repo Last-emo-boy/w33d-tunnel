@@ -6,7 +6,6 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/glebarez/sqlite"
@@ -95,6 +94,58 @@ func main() {
 }
 
 // Handlers
+
+func handleReport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", 405)
+		return
+	}
+
+	var payload struct {
+		NodeID string `json:"node_id"`
+		Stats  []struct {
+			Token string `json:"token"`
+			Read  uint64 `json:"read"`
+			Write uint64 `json:"write"`
+		} `json:"stats"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+
+	// Update Node LastSeen
+	var node Node
+	if result := db.First(&node, "id = ?", payload.NodeID); result.Error != nil {
+		// Auto create
+		db.Create(&Node{
+			ID:       payload.NodeID,
+			Name:     payload.NodeID,
+			LastSeen: time.Now(),
+		})
+	} else {
+		db.Model(&node).Update("LastSeen", time.Now())
+	}
+
+	// Log Traffic
+	logs := []TrafficLog{}
+	for _, s := range payload.Stats {
+		logs = append(logs, TrafficLog{
+			NodeID:       payload.NodeID,
+			UserToken:    s.Token,
+			BytesRead:    s.Read,
+			BytesWritten: s.Write,
+			Timestamp:    time.Now(),
+		})
+	}
+	
+	if len(logs) > 0 {
+		db.Create(&logs)
+	}
+
+	w.WriteHeader(200)
+}
 
 func handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
@@ -254,8 +305,6 @@ func handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Aggregate
-	var totalRead, totalWrite uint64
-	
 	type Result struct {
 		R uint64
 		W uint64
