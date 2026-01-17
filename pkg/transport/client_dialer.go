@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"net"
 	"time"
@@ -16,16 +17,28 @@ import (
 type ClientDialer struct {
 	ServerAddr *net.UDPAddr
 	ServerPub  []byte
+	LossPercent int
+	Token      string
 }
 
-func NewClientDialer(serverAddr string, serverPub []byte) (*ClientDialer, error) {
+func NewClientDialer(serverAddr string, serverPubHex string, lossPercent int, token string) (*ClientDialer, error) {
+	// Resolve Address
 	addr, err := net.ResolveUDPAddr("udp", serverAddr)
 	if err != nil {
 		return nil, err
 	}
+	
+	// Decode Pub Key
+	pub, err := hex.DecodeString(serverPubHex)
+	if err != nil {
+		return nil, err
+	}
+	
 	return &ClientDialer{
 		ServerAddr: addr,
-		ServerPub:  serverPub,
+		ServerPub:  pub,
+		LossPercent: lossPercent,
+		Token:      token,
 	}, nil
 }
 
@@ -42,6 +55,7 @@ func (d *ClientDialer) Dial(ctx context.Context) (any, error) {
 	// 2. Perform Handshake
 	priv, _, _ := crypto.GenerateKeyPair()
 	sess := protocol.NewSession(protocol.RoleClient, priv, d.ServerPub)
+	sess.Token = d.Token
 	
 	initPacket, err := sess.CreateHandshakeInitiation()
 	if err != nil {
@@ -49,7 +63,10 @@ func (d *ClientDialer) Dial(ctx context.Context) (any, error) {
 		return nil, err
 	}
 	
-	if _, err := conn.WriteToUDP(initPacket, d.ServerAddr); err != nil {
+	// Add Fake Header to Init Packet
+	finalInit := AddFakeHeader(initPacket, FakeHeaderRTP)
+	
+	if _, err := conn.WriteToUDP(finalInit, d.ServerAddr); err != nil {
 		conn.Close()
 		return nil, err
 	}
@@ -63,16 +80,24 @@ func (d *ClientDialer) Dial(ctx context.Context) (any, error) {
 		return nil, errors.New("handshake timeout")
 	}
 	
-	if err := sess.ProcessHandshakeResponse(buf[:n]); err != nil {
+	// Remove Fake Header from Response
+	rawResp := RemoveFakeHeader(buf[:n], FakeHeaderRTP)
+	if len(rawResp) == 0 {
+		conn.Close()
+		return nil, errors.New("invalid handshake response header")
+	}
+	
+	if err := sess.ProcessHandshakeResponse(rawResp); err != nil {
 		conn.Close()
 		return nil, err
 	}
 	
 	conn.SetReadDeadline(time.Time{})
+	
 	logger.Info("Handshake Successful. Upgrading to QUIC...")
 	
-	// 3. Wrap in ObfuscatedConn
-	obfsConn := NewObfuscatedPacketConn(conn, sess)
+	// 3. Wrap Connection with Obfuscation Layer
+	obfsConn := NewObfuscatedPacketConn(conn, sess, d.LossPercent)
 	
 	// 4. Dial QUIC
 	tlsConfig := crypto.GenerateTLSConfig()
@@ -82,6 +107,7 @@ func (d *ClientDialer) Dial(ctx context.Context) (any, error) {
 	quicConfig := &quic.Config{
 		MaxIdleTimeout: 30 * time.Second,
 		KeepAlivePeriod: 10 * time.Second,
+		EnableDatagrams: true,
 	}
 	
 	return quic.Dial(ctx, obfsConn, d.ServerAddr, tlsConfig, quicConfig)

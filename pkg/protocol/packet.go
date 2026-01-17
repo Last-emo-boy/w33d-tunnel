@@ -7,7 +7,8 @@ import (
 )
 
 const (
-	FlagUnreliable = 1 << 5 // New flag for unreliable datagrams (e.g. UDP Associate)
+	FlagUnreliable = 1 << 5 // New flag for unreliable datagrams
+	FlagFEC        = 1 << 6 // New flag for FEC Parity packets
 )
 
 // Header represents the plaintext header of a data packet.
@@ -81,13 +82,48 @@ func BuildDataPacket(key, nonce []byte, header Header, payload []byte) ([]byte, 
 	copy(plaintext, headerBytes)
 	copy(plaintext[len(headerBytes):], payload)
 
-	// Add padding (Variable Random 0-128 bytes)
-	// Improved Obfuscation: Larger padding range to mask traffic patterns.
-	// We use crypto/rand for secure randomness.
-	padByte := crypto.RandomBytes(1)[0]
-	padLen := int(padByte % 128) // 0-127 bytes
-	padding := crypto.RandomBytes(padLen)
-	plaintext = append(plaintext, padding...)
+	// Smart Padding (Bucket Padding)
+	// Buckets: 128, 256, 512, 768, 1024, 1280
+	// Reduced Max Bucket to 1280 to allow plenty of room for:
+	// - Poly1305 Tag (16)
+	// - Seq Prefix (8)
+	// - Fake Header (12)
+	// - IP + UDP Headers (20+8=28)
+	// Total Overhead ~ 64 bytes.
+	// 1280 + 64 = 1344 < 1350 (Safe MTU for PPPoE/VPNs)
+	
+	currentSize := len(plaintext)
+	overhead := 24 // 16 tag + 8 seq
+	
+	// Define Buckets (Target Total Sizes)
+	buckets := []int{128, 256, 512, 768, 1024, 1280}
+	
+	targetSize := 0
+	for _, b := range buckets {
+		if currentSize + overhead <= b {
+			targetSize = b
+			break
+		}
+	}
+	
+	// If packet is larger than largest bucket, pad to MTU (1350) or just add small random padding
+	if targetSize == 0 {
+		// Just random padding 0-31 bytes to break exact length
+		targetSize = currentSize + overhead + int(crypto.RandomBytes(1)[0]%32)
+		if targetSize > 1350 {
+			targetSize = 1350 // Cap at Safe MTU
+		}
+	}
+	
+	padLen := targetSize - (currentSize + overhead)
+	if padLen < 0 {
+		padLen = 0 // Should not happen if logic is correct
+	}
+	
+	if padLen > 0 {
+		padding := crypto.RandomBytes(padLen)
+		plaintext = append(plaintext, padding...)
+	}
 
 	// 3. Encrypt
 	// Additional Data: The RFC doesn't explicitly mention AAD for data packets,

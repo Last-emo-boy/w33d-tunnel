@@ -37,12 +37,20 @@ func (s *Session) CreateHandshakeInitiation() ([]byte, error) {
 	}
 
 	// 4. Prepare Payload
-	// For now, just some dummy version/timestamp/padding.
-	// [Version 1b] [Timestamp 8b] [Padding var]
-	payload := make([]byte, 1+8+32) // Fixed padding for now
-	payload[0] = 1                  // Version
-	// Timestamp... skip for now, just random
-	copy(payload[1:], crypto.RandomBytes(8+32))
+	// [Version 1b] [Timestamp 8b] [TokenLen 1b] [Token var] [Padding var]
+	tokenBytes := []byte(s.Token)
+	tokenLen := len(tokenBytes)
+	if tokenLen > 255 {
+		return nil, errors.New("token too long")
+	}
+	
+	payload := make([]byte, 1+8+1+tokenLen+32) 
+	payload[0] = 1 // Version
+	// Timestamp...
+	copy(payload[1:], crypto.RandomBytes(8))
+	payload[9] = byte(tokenLen)
+	copy(payload[10:], tokenBytes)
+	copy(payload[10+tokenLen:], crypto.RandomBytes(32))
 
 	// 5. Encrypt Payload
 	// Nonce for handshake is 0 or random?
@@ -177,11 +185,25 @@ func (s *Session) ProcessHandshakeInitiation(data []byte) ([]byte, error) {
 	// 4. Decrypt Payload
 	encryptedPayload := data[48:]
 	nonce := make([]byte, NonceSize)
-	_, err = crypto.Decrypt(hk, nonce, encryptedPayload, nil)
+	decrypted, err := crypto.Decrypt(hk, nonce, encryptedPayload, nil)
 	if err != nil {
 		return nil, errors.New("failed to decrypt initiation")
 	}
-	// Verify payload (version etc)... skip for now.
+	
+	// Parse Payload: [Version 1b] [Timestamp 8b] [TokenLen 1b] [Token var] [Padding...]
+	if len(decrypted) < 10 {
+		return nil, errors.New("payload too short")
+	}
+	
+	// version := decrypted[0]
+	tokenLen := int(decrypted[9])
+	if len(decrypted) < 10+tokenLen {
+		return nil, errors.New("payload too short for token")
+	}
+	
+	s.Token = string(decrypted[10 : 10+tokenLen])
+	// TODO: Validate Token here or later?
+	// For now, we just store it in Session.
 
 	// 5. Generate Server Ephemeral E_S
 	if err := s.GenerateEphemeralKeys(); err != nil {

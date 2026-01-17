@@ -9,7 +9,8 @@ import (
 const (
 	LevelDebug = 0
 	LevelInfo  = 1
-	LevelError = 2
+	LevelWarn  = 2
+	LevelError = 3
 )
 
 var currentLevel = LevelInfo
@@ -31,6 +32,13 @@ func Debug(format string, v ...interface{}) {
 func Info(format string, v ...interface{}) {
 	if currentLevel <= LevelInfo {
 		logger.Printf("[INFO]  "+format, v...)
+	}
+}
+
+// Warn logs warning messages.
+func Warn(format string, v ...interface{}) {
+	if currentLevel <= LevelWarn {
+		logger.Printf("[WARN]  "+format, v...)
 	}
 }
 

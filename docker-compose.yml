@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  manager:
+    build:
+      context: .
+      dockerfile: docker/manager/Dockerfile
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/root/data
+    restart: always
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    ports:
+      - "80:80"
+    depends_on:
+      - manager
+    restart: always
