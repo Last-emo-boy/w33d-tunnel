@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { listUsers, createUser, listNodes } from '../api';
-import { Copy, Plus, RefreshCw, UserPlus, Server } from 'lucide-react';
+import { Copy, RefreshCw, UserPlus, Server } from 'lucide-react';
 
 interface User {
   id: number;
