@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"encoding/binary"
 	"math/rand"
 	"net"
 	"time"

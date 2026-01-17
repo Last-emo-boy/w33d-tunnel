@@ -162,6 +162,7 @@ func (s *ServerObfuscatedPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, e
 	copy(p, pkt.Payload)
 	PutBuffer2K(buf)
 	return len(pkt.Payload), addr, nil
+	}
 }
 
 func (s *ServerObfuscatedPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
@@ -234,41 +235,6 @@ func (sm *SessionManager) GetStats() []map[string]interface{} {
 		}
 	}
 	return results
-}
-}
-
-func (s *ServerObfuscatedPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
-	// Find Session
-	sess := s.manager.GetSession(addr)
-	if sess == nil {
-		// We are trying to write to an unknown address?
-		// QUIC might be responding to a new client?
-		// But we should have created session in ReadFrom.
-		return 0, errors.New("session not found for write")
-	}
-	
-	// Encrypt
-	header := protocol.Header{
-		Flags:      protocol.FlagData,
-		PayloadLen: uint16(len(p)),
-	}
-	
-	seq := sess.IncrementSendSeq()
-	nonce := sess.ConstructNonce(sess.SendNonceSalt, seq)
-	
-	encPkt, err := protocol.BuildDataPacketWithSeq(sess.SendKey, nonce, header, p, seq, sess.SendHeaderKey)
-	if err != nil {
-		return 0, err
-	}
-	
-	finalPkt := AddFakeHeader(encPkt, FakeHeaderRTP)
-	
-	_, err = s.conn.WriteTo(finalPkt, addr)
-	if err != nil {
-		return 0, err
-	}
-	
-	return len(p), nil
 }
 
 func (s *ServerObfuscatedPacketConn) Close() error {

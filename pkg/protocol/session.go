@@ -337,3 +337,13 @@ func (s *Session) DecryptPacket(data []byte, windowSize uint64) (*DataPacket, ui
 
 	return pkt, seq, nil
 }
+
+// EncryptPacket encrypts a payload with the given sequence number.
+func (s *Session) EncryptPacket(payload []byte, seq uint64) ([]byte, error) {
+	header := Header{
+		Flags:      FlagData,
+		PayloadLen: uint16(len(payload)),
+	}
+	nonce := s.ConstructNonce(s.SendNonceSalt, seq)
+	return BuildDataPacketWithSeq(s.SendKey, nonce, header, payload, seq, s.SendHeaderKey)
+}

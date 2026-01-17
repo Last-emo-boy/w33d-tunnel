@@ -162,6 +162,7 @@ func NewFECDecoder() (*FECDecoder, error) {
 // Returns recovered packets if any.
 // 
 // Note: This requires packets to carry FEC Group information.
+func (d *FECDecoder) HandlePacket(packet []byte, header protocol.Header) ([][]byte, error) {
 	// Payload Wrapper: [Group(8)][Index(1)][Content]
 	if len(packet) < 9 {
 		return nil, errors.New("packet too short for FEC wrapper")
