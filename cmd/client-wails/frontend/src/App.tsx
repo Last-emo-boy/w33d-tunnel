@@ -86,7 +86,7 @@ const formatBytes = (bytes: number) => {
 };
 
 function App() {
-  const [config, setConfig] = useState({ sub_url: '', socks_addr: ':1080', global_proxy: false });
+  const [config, setConfig] = useState({ sub_url: '', socks_addr: ':1080', global_proxy: false, auto_start: false });
   const [status, setStatus] = useState('disconnected');
   const [stats, setStats] = useState({ bytes_tx: 0, bytes_rx: 0 });
   const [logs, setLogs] = useState<string[]>([]);
@@ -193,7 +193,7 @@ function App() {
               disabled={status !== 'disconnected'}
             />
             
-            <div className="grid grid-cols-[1.5fr_1fr] gap-4 items-end">
+            <div className="grid grid-cols-[1.5fr_1fr_1fr] gap-4 items-end">
               <Input 
                 label="Local Port" 
                 icon={Zap}
@@ -210,6 +210,16 @@ function App() {
                   label={config.global_proxy ? "Active" : "Off"}
                   disabled={status !== 'disconnected'}
                   onClick={() => setConfig({...config, global_proxy: !config.global_proxy})}
+                />
+              </div>
+
+              <div className="space-y-1">
+                <Label>Auto Start</Label>
+                <ToggleButton 
+                  active={config.auto_start}
+                  label={config.auto_start ? "On" : "Off"}
+                  disabled={status !== 'disconnected'}
+                  onClick={() => setConfig({...config, auto_start: !config.auto_start})}
                 />
               </div>
             </div>

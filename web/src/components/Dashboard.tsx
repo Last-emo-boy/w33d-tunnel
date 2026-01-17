@@ -13,6 +13,7 @@ interface User {
   token: string;
   created_at: string;
   quota_bytes: number;
+  used_bytes: number;
   bandwidth_limit: number;
 }
 
@@ -256,7 +257,7 @@ export default function Dashboard() {
                   <tr>
                     <th className="px-6 py-4 font-semibold text-gray-500">ID</th>
                     <th className="px-6 py-4 font-semibold text-gray-500">Username</th>
-                    <th className="px-6 py-4 font-semibold text-gray-500">Quota</th>
+                    <th className="px-6 py-4 font-semibold text-gray-500">Usage / Quota</th>
                     <th className="px-6 py-4 font-semibold text-gray-500">Limit</th>
                     <th className="px-6 py-4 font-semibold text-gray-500">Subscription</th>
                     <th className="px-6 py-4 font-semibold text-gray-500">Created At</th>
@@ -276,7 +277,25 @@ export default function Dashboard() {
                         </div>
                       </td>
                       <td className="px-6 py-4">
-                        <Badge variant="default">{(u.quota_bytes / 1024 / 1024 / 1024).toFixed(0)} GB</Badge>
+                        <div className="flex flex-col gap-1.5 w-32">
+                           <div className="flex justify-between text-xs font-medium">
+                             <span className="text-gray-600">
+                               {(u.used_bytes / 1024 / 1024 / 1024).toFixed(2)} GB
+                             </span>
+                             <span className="text-gray-400">
+                               / {(u.quota_bytes / 1024 / 1024 / 1024).toFixed(0)} GB
+                             </span>
+                           </div>
+                           <div className="h-1.5 w-full bg-gray-100 rounded-full overflow-hidden">
+                             <div 
+                               className={`h-full rounded-full transition-all duration-500 ${
+                                 (u.used_bytes / u.quota_bytes) > 0.9 ? 'bg-red-500' : 
+                                 (u.used_bytes / u.quota_bytes) > 0.7 ? 'bg-yellow-500' : 'bg-blue-500'
+                               }`}
+                               style={{ width: `${Math.min((u.used_bytes / u.quota_bytes) * 100, 100)}%` }}
+                             />
+                           </div>
+                        </div>
                       </td>
                       <td className="px-6 py-4">
                         {u.bandwidth_limit > 0 ? (

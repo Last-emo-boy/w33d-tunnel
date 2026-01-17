@@ -13,6 +13,7 @@ import (
 	"w33d-tunnel/pkg/logger"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
+	"golang.org/x/sys/windows/registry"
 )
 
 // App struct
@@ -27,6 +28,7 @@ type Config struct {
 	SubURL      string `json:"sub_url"`
 	SocksAddr   string `json:"socks_addr"`
 	GlobalProxy bool   `json:"global_proxy"`
+	AutoStart   bool   `json:"auto_start"`
 }
 
 type Stats struct {
@@ -91,10 +93,41 @@ func (a *App) LoadConfig() Config {
 	if cfg.SocksAddr == "" {
 		cfg.SocksAddr = ":1080"
 	}
+	
+	// Check Registry for AutoStart status (Source of Truth)
+	// Because config file might be out of sync if user changed it manually or registry failed.
+	// But actually, we set registry when saving config.
+	// Let's trust config file for the UI state, but maybe verify?
+	// For simplicity, just read config.
+	
 	return cfg
 }
 
+func (a *App) setAutoStart(enable bool) error {
+	k, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Run`, registry.QUERY_VALUE|registry.SET_VALUE)
+	if err != nil {
+		return err
+	}
+	defer k.Close()
+
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+
+	if enable {
+		return k.SetStringValue("w33d-tunnel", exe)
+	} else {
+		return k.DeleteValue("w33d-tunnel")
+	}
+}
+
 func (a *App) SaveConfig(cfg Config) error {
+	// Handle AutoStart
+	if err := a.setAutoStart(cfg.AutoStart); err != nil {
+		fmt.Printf("Failed to set auto-start: %v\n", err)
+	}
+
 	dir := filepath.Dir(a.configPath)
 	os.MkdirAll(dir, 0755)
 	data, _ := json.MarshalIndent(cfg, "", "  ")
