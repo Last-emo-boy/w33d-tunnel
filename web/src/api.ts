@@ -37,6 +37,20 @@ export const createUser = async (username: string, quotaGB: number, bandwidthLim
   return res.data;
 };
 
+export const updateUser = async (token: string, quotaGB: number, bandwidthLimit: number) => {
+  const res = await api.put('/admin/users', { 
+    token, 
+    quota_gb: quotaGB,
+    bandwidth_limit: bandwidthLimit 
+  });
+  return res.data;
+};
+
+export const deleteUser = async (token: string) => {
+  const res = await api.delete(`/admin/users?token=${token}`);
+  return res.data;
+};
+
 export const listNodes = async () => {
   const res = await api.get('/nodes');
   return res.data;

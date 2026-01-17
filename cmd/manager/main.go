@@ -71,8 +71,8 @@ func main() {
 	corsHandler := func(h http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Admin-Token")
 			if r.Method == "OPTIONS" {
 				return
 			}
@@ -250,6 +250,48 @@ func handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 		}
 		
 		json.NewEncoder(w).Encode(user)
+		return
+	}
+
+	if r.Method == "PUT" {
+		var payload struct {
+			Token          string `json:"token"`
+			QuotaGB        int64  `json:"quota_gb"`
+			BandwidthLimit int64  `json:"bandwidth_limit"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+
+		updates := map[string]interface{}{}
+		if payload.QuotaGB > 0 {
+			updates["QuotaBytes"] = payload.QuotaGB * 1024 * 1024 * 1024
+		}
+		// Allow 0 to reset limit
+		if payload.BandwidthLimit >= 0 {
+			updates["BandwidthLimit"] = payload.BandwidthLimit
+		}
+
+		if err := db.Model(&User{}).Where("token = ?", payload.Token).Updates(updates).Error; err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		w.WriteHeader(200)
+		return
+	}
+
+	if r.Method == "DELETE" {
+		token := r.URL.Query().Get("token")
+		if token == "" {
+			http.Error(w, "Token required", 400)
+			return
+		}
+		if err := db.Where("token = ?", token).Delete(&User{}).Error; err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		w.WriteHeader(200)
 		return
 	}
 }

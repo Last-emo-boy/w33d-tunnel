@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { listUsers, createUser, listNodes } from '../api';
-import { Copy, RefreshCw, UserPlus, Server, Users, Activity, Shield, LogOut, CheckCircle2, XCircle, Search } from 'lucide-react';
+import { listUsers, createUser, updateUser, deleteUser, listNodes } from '../api';
+import { Copy, RefreshCw, UserPlus, Server, Users, Activity, Shield, LogOut, CheckCircle2, XCircle, Search, Edit2, Trash2, Save } from 'lucide-react';
 import { Card } from './ui/Card';
 import { Button } from './ui/Button';
 import { Input } from './ui/Input';
@@ -13,6 +13,7 @@ interface User {
   token: string;
   created_at: string;
   quota_bytes: number;
+  bandwidth_limit: number;
 }
 
 interface Node {
@@ -34,6 +35,11 @@ export default function Dashboard() {
   const [bandwidth, setBandwidth] = useState(0); // 0 = Unlimited
   const [showModal, setShowModal] = useState(false);
   const [creating, setCreating] = useState(false);
+  
+  // Edit State
+  const [editingUser, setEditingUser] = useState<User | null>(null);
+  const [editQuota, setEditQuota] = useState(0);
+  const [editBandwidth, setEditBandwidth] = useState(0);
 
   const fetchData = async () => {
     setLoading(true);
@@ -70,6 +76,29 @@ export default function Dashboard() {
       alert('Failed to create user');
     } finally {
       setCreating(false);
+    }
+  };
+  
+  const handleEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingUser) return;
+    try {
+      const bwBytes = editBandwidth * 1024 * 1024;
+      await updateUser(editingUser.token, editQuota, bwBytes);
+      setEditingUser(null);
+      fetchData();
+    } catch (err) {
+      alert('Failed to update user');
+    }
+  };
+
+  const handleDelete = async (token: string) => {
+    if (!confirm('Are you sure you want to delete this tenant?')) return;
+    try {
+      await deleteUser(token);
+      fetchData();
+    } catch (err) {
+      alert('Failed to delete user');
     }
   };
 
@@ -228,6 +257,7 @@ export default function Dashboard() {
                     <th className="px-6 py-4 font-semibold text-gray-500">ID</th>
                     <th className="px-6 py-4 font-semibold text-gray-500">Username</th>
                     <th className="px-6 py-4 font-semibold text-gray-500">Quota</th>
+                    <th className="px-6 py-4 font-semibold text-gray-500">Limit</th>
                     <th className="px-6 py-4 font-semibold text-gray-500">Subscription</th>
                     <th className="px-6 py-4 font-semibold text-gray-500">Created At</th>
                     <th className="px-6 py-4 font-semibold text-gray-500 text-right">Actions</th>
@@ -249,6 +279,13 @@ export default function Dashboard() {
                         <Badge variant="default">{(u.quota_bytes / 1024 / 1024 / 1024).toFixed(0)} GB</Badge>
                       </td>
                       <td className="px-6 py-4">
+                        {u.bandwidth_limit > 0 ? (
+                           <Badge variant="warning">{(u.bandwidth_limit / 1024 / 1024).toFixed(0)} MB/s</Badge>
+                        ) : (
+                           <span className="text-gray-400 text-xs">Unlimited</span>
+                        )}
+                      </td>
+                      <td className="px-6 py-4">
                         <div className="flex items-center gap-2 max-w-[200px]">
                            <code className="text-xs bg-gray-50 px-2 py-1 rounded border border-gray-200 truncate flex-1 text-gray-500 select-all">
                              {getSubLink(u.token)}
@@ -259,13 +296,33 @@ export default function Dashboard() {
                         {new Date(u.created_at).toLocaleDateString()}
                       </td>
                       <td className="px-6 py-4 text-right">
-                         <button 
-                           onClick={() => copyToClipboard(getSubLink(u.token))}
-                           className="text-gray-400 hover:text-blue-600 p-1.5 hover:bg-blue-50 rounded-lg transition-colors"
-                           title="Copy Link"
-                         >
-                           <Copy size={16} />
-                         </button>
+                         <div className="flex items-center justify-end gap-2">
+                           <button 
+                             onClick={() => {
+                               setEditingUser(u);
+                               setEditQuota(Math.floor(u.quota_bytes / 1024 / 1024 / 1024));
+                               setEditBandwidth(Math.floor(u.bandwidth_limit / 1024 / 1024));
+                             }}
+                             className="text-gray-400 hover:text-blue-600 p-1.5 hover:bg-blue-50 rounded-lg transition-colors"
+                             title="Edit"
+                           >
+                             <Edit2 size={16} />
+                           </button>
+                           <button 
+                             onClick={() => copyToClipboard(getSubLink(u.token))}
+                             className="text-gray-400 hover:text-green-600 p-1.5 hover:bg-green-50 rounded-lg transition-colors"
+                             title="Copy Link"
+                           >
+                             <Copy size={16} />
+                           </button>
+                           <button 
+                             onClick={() => handleDelete(u.token)}
+                             className="text-gray-400 hover:text-red-600 p-1.5 hover:bg-red-50 rounded-lg transition-colors"
+                             title="Delete"
+                           >
+                             <Trash2 size={16} />
+                           </button>
+                         </div>
                       </td>
                     </tr>
                   ))}
@@ -284,6 +341,49 @@ export default function Dashboard() {
           </div>
         </section>
       </main>
+
+      {/* Edit User Modal */}
+      {editingUser && (
+        <div className="fixed inset-0 bg-black/20 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-in fade-in duration-200">
+          <Card className="w-full max-w-md p-0 overflow-hidden shadow-2xl animate-in zoom-in-95 duration-200">
+            <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/50 flex justify-between items-center">
+              <h3 className="font-bold text-gray-900">Edit Tenant: {editingUser.username}</h3>
+              <button onClick={() => setEditingUser(null)} className="text-gray-400 hover:text-gray-600">
+                <XCircle size={20} />
+              </button>
+            </div>
+            
+            <form onSubmit={handleEdit} className="p-6 space-y-4">
+              <Input
+                label="Data Quota (GB)"
+                type="number"
+                placeholder="10"
+                value={editQuota}
+                onChange={(e) => setEditQuota(parseInt(e.target.value) || 0)}
+                required
+                min="1"
+              />
+              <Input
+                label="Speed Limit (MB/s) - 0 for Unlimited"
+                type="number"
+                placeholder="0"
+                value={editBandwidth}
+                onChange={(e) => setEditBandwidth(parseInt(e.target.value) || 0)}
+                min="0"
+              />
+              
+              <div className="flex justify-end gap-3 pt-2">
+                <Button type="button" variant="secondary" onClick={() => setEditingUser(null)}>
+                  Cancel
+                </Button>
+                <Button type="submit" icon={Save}>
+                  Save Changes
+                </Button>
+              </div>
+            </form>
+          </Card>
+        </div>
+      )}
 
       {/* Modal Backdrop */}
       {showModal && (
