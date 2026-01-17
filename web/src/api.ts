@@ -28,8 +28,12 @@ export const listUsers = async () => {
   return res.data;
 };
 
-export const createUser = async (username: string, quotaGB: number) => {
-  const res = await api.post('/admin/users', { username, quota_gb: quotaGB });
+export const createUser = async (username: string, quotaGB: number, bandwidthLimit: number) => {
+  const res = await api.post('/admin/users', { 
+    username, 
+    quota_gb: quotaGB,
+    bandwidth_limit: bandwidthLimit // Bytes/s
+  });
   return res.data;
 };
 

@@ -6,6 +6,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"golang.org/x/time/rate"
 	"w33d-tunnel/pkg/crypto"
 )
 
@@ -63,6 +65,9 @@ type Session struct {
 
 	RemoteAddr net.Addr
 	LastActive time.Time
+
+	// Rate Limiter
+	RateLimiter *rate.Limiter
 	
 	// FEC
 	FECEncoder interface{

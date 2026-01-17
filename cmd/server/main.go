@@ -32,14 +32,36 @@ var (
 	advertised  = flag.String("advertised-addr", "", "Advertised Address (host:port) for clients to connect. If empty, uses 127.0.0.1:port")
 )
 
-func startPingServer(port int) {
-	http.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*") // Allow CORS for frontend
+func startPingServer(port int, conn *transport.ServerObfuscatedPacketConn) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("pong"))
 	})
-	logger.Info("Ping Server started on :%d", port)
-	http.ListenAndServe(fmt.Sprintf(":%d", port), nil)
+	
+	// Admin Kick API
+	// POST /admin/kick?token=xxx
+	// TODO: Add Auth (Local secret?)
+	mux.HandleFunc("/admin/kick", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			http.Error(w, "Method not allowed", 405)
+			return
+		}
+		token := r.URL.Query().Get("token")
+		if token == "" {
+			http.Error(w, "Token required", 400)
+			return
+		}
+		
+		conn.CloseSessionByToken(token)
+		logger.Info("Kicked session for token: %s", token)
+		w.WriteHeader(200)
+		w.Write([]byte("ok"))
+	})
+
+	logger.Info("Ping/Admin Server started on :%d", port)
+	http.ListenAndServe(fmt.Sprintf(":%d", port), mux)
 }
 
 func getPublicIP() string {
@@ -142,6 +164,60 @@ func runTrafficReporter(conn *transport.ServerObfuscatedPacketConn) {
 	}
 }
 
+func runUserSync(conn *transport.ServerObfuscatedPacketConn) {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+	
+	// Initial Sync
+	sync := func() {
+		resp, err := http.Get(*managerAddr + "/api/sync_users")
+		if err != nil {
+			logger.Error("Sync users failed: %v", err)
+			return
+		}
+		defer resp.Body.Close()
+		
+		var payload struct {
+			Users []struct {
+				Token      string `json:"token"`
+				QuotaBytes int64  `json:"quota_bytes"`
+				UsedBytes  int64  `json:"used_bytes"`
+				BandwidthLimit int64 `json:"bandwidth_limit"`
+			} `json:"users"`
+		}
+		
+		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+			logger.Error("Sync users parse failed: %v", err)
+			return
+		}
+		
+		// Convert to map
+		tokens := make(map[string]transport.QuotaInfo)
+		for _, u := range payload.Users {
+			tokens[u.Token] = transport.QuotaInfo{
+				QuotaBytes: u.QuotaBytes,
+				UsedBytes:  u.UsedBytes,
+				BandwidthLimit: u.BandwidthLimit,
+			}
+		}
+		
+		// Get Manager
+		// We need to access conn.manager.
+		// conn.GetSessionManager().UpdateValidTokens(tokens)
+		// But Manager is private.
+		// Let's add GetSessionManager() to ServerObfuscatedPacketConn.
+		conn.UpdateValidTokens(tokens)
+		
+		logger.Info("Synced %d users from Manager", len(tokens))
+	}
+	
+	sync()
+	
+	for range ticker.C {
+		sync()
+	}
+}
+
 type QUICConnection interface {
 	AcceptStream(context.Context) (*quic.Stream, error)
 	ReceiveDatagram(context.Context) ([]byte, error)
@@ -212,14 +288,15 @@ func main() {
 	serverConn := transport.NewServerObfuscatedPacketConn(udpConn, priv, *simLoss)
 	
 	// Start Ping Endpoint
-	go startPingServer(8090) // Hardcoded for now
+	go startPingServer(8090, serverConn) // Hardcoded for now
 	
 	// Register to Manager
 	go registerToManager(pub)
 	
 	// Start Reporter
 	go runTrafficReporter(serverConn)
-
+	go runUserSync(serverConn)
+	
 	// TLS Config for QUIC (Inner Layer)
 	// We can generate self-signed certs because we trust the Outer Layer authentication.
 	// Or use the keys we already have.

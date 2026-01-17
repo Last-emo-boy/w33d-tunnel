@@ -18,6 +18,11 @@ var currentLevel = LevelInfo
 var logger = log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)
 var outputCallback func(string)
 
+// SetLevel sets the global log level.
+func SetLevel(level int) {
+	currentLevel = level
+}
+
 // SetOutputCallback sets a callback function to receive log messages.
 func SetOutputCallback(callback func(string)) {
 	outputCallback = callback

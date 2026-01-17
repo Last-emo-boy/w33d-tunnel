@@ -31,6 +31,7 @@ export default function Dashboard() {
   // New User Form
   const [username, setUsername] = useState('');
   const [quota, setQuota] = useState(10);
+  const [bandwidth, setBandwidth] = useState(0); // 0 = Unlimited
   const [showModal, setShowModal] = useState(false);
   const [creating, setCreating] = useState(false);
 
@@ -57,9 +58,13 @@ export default function Dashboard() {
     e.preventDefault();
     setCreating(true);
     try {
-      await createUser(username, quota);
+      // Convert MB/s to Bytes/s if needed, or input is Bytes/s
+      // Let's assume input is MB/s for user friendliness
+      const bwBytes = bandwidth * 1024 * 1024;
+      await createUser(username, quota, bwBytes);
       setShowModal(false);
       setUsername('');
+      setBandwidth(0);
       fetchData();
     } catch (err) {
       alert('Failed to create user');
@@ -308,6 +313,14 @@ export default function Dashboard() {
                 onChange={(e) => setQuota(parseInt(e.target.value) || 0)}
                 required
                 min="1"
+              />
+              <Input
+                label="Speed Limit (MB/s) - 0 for Unlimited"
+                type="number"
+                placeholder="0"
+                value={bandwidth}
+                onChange={(e) => setBandwidth(parseInt(e.target.value) || 0)}
+                min="0"
               />
               
               <div className="flex justify-end gap-3 pt-2">

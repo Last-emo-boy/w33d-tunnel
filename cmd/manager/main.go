@@ -19,6 +19,8 @@ type User struct {
 	Token     string    `gorm:"unique;index" json:"token"`
 	CreatedAt time.Time `json:"created_at"`
 	QuotaBytes int64    `json:"quota_bytes"`
+	UsedBytes  int64    `json:"used_bytes"`
+	BandwidthLimit int64 `json:"bandwidth_limit"` // Bytes/s
 }
 
 type Node struct {
@@ -81,6 +83,7 @@ func main() {
 	// Routes
 	http.HandleFunc("/api/report", corsHandler(handleReport))
 	http.HandleFunc("/api/subscribe", corsHandler(handleSubscribe))
+	http.HandleFunc("/api/sync_users", corsHandler(handleSyncUsers)) // For Server
 	http.HandleFunc("/api/nodes", corsHandler(handleNodes))
 	http.HandleFunc("/api/stats", corsHandler(handleStats))
 	http.HandleFunc("/api/register_node", corsHandler(handleRegisterNode))
@@ -128,8 +131,10 @@ func handleReport(w http.ResponseWriter, r *http.Request) {
 		db.Model(&node).Update("LastSeen", time.Now())
 	}
 
-	// Log Traffic
+	// Log Traffic & Update User Usage
 	logs := []TrafficLog{}
+	usageMap := make(map[string]int64)
+
 	for _, s := range payload.Stats {
 		logs = append(logs, TrafficLog{
 			NodeID:       payload.NodeID,
@@ -138,13 +143,46 @@ func handleReport(w http.ResponseWriter, r *http.Request) {
 			BytesWritten: s.Write,
 			Timestamp:    time.Now(),
 		})
+		usageMap[s.Token] += int64(s.Read + s.Write)
 	}
 	
 	if len(logs) > 0 {
 		db.Create(&logs)
+		
+		// Update Users
+		for token, usage := range usageMap {
+			db.Model(&User{}).Where("token = ?", token).Update("used_bytes", gorm.Expr("used_bytes + ?", usage))
+		}
 	}
 
 	w.WriteHeader(200)
+}
+
+func handleSyncUsers(w http.ResponseWriter, r *http.Request) {
+	// TODO: Auth check (Node Secret?)
+	var users []User
+	db.Find(&users)
+	
+	type UserSync struct {
+		Token     string `json:"token"`
+		QuotaBytes int64  `json:"quota_bytes"`
+		UsedBytes  int64  `json:"used_bytes"`
+		BandwidthLimit int64 `json:"bandwidth_limit"`
+	}
+	
+	res := []UserSync{}
+	for _, u := range users {
+		res = append(res, UserSync{
+			Token:      u.Token,
+			QuotaBytes: u.QuotaBytes,
+			UsedBytes:  u.UsedBytes,
+			BandwidthLimit: u.BandwidthLimit,
+		})
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"users": res,
+	})
 }
 
 func handleAdminLogin(w http.ResponseWriter, r *http.Request) {
@@ -188,6 +226,7 @@ func handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 		var payload struct {
 			Username string `json:"username"`
 			QuotaGB  int64  `json:"quota_gb"`
+			BandwidthLimit int64 `json:"bandwidth_limit"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			http.Error(w, err.Error(), 400)
@@ -198,10 +237,11 @@ func handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 		token := fmt.Sprintf("u-%d-%s", time.Now().Unix(), randString(8))
 		
 		user := User{
-			Username:   payload.Username,
-			Token:      token,
-			CreatedAt:  time.Now(),
-			QuotaBytes: payload.QuotaGB * 1024 * 1024 * 1024,
+			Username:       payload.Username,
+			Token:          token,
+			CreatedAt:      time.Now(),
+			QuotaBytes:     payload.QuotaGB * 1024 * 1024 * 1024,
+			BandwidthLimit: payload.BandwidthLimit,
 		}
 		
 		if err := db.Create(&user).Error; err != nil {
