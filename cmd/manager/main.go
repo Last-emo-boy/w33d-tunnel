@@ -90,7 +90,7 @@ func main() {
 	http.HandleFunc("/api/admin/login", corsHandler(handleAdminLogin))
 
 	fmt.Println("Manager listening on :2933")
-	http.ListenAndServe(":2933", corsHandler(http.NotFound))
+	http.ListenAndServe(":2933", nil)
 }
 
 // Handlers
