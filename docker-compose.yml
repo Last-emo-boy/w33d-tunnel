@@ -11,21 +11,6 @@ services:
       - ./data:/root/data
     restart: always
 
-  server:
-    build:
-      context: .
-      dockerfile: docker/server/Dockerfile
-    ports:
-      - "8080:8080/udp"
-      - "8090:8090"
-    command: >
-      ./server 
-      -port 8080 
-      -manager http://manager:2933/api 
-      -node-id ${NODE_ID:-node-1} 
-      -advertised-addr ${PUBLIC_IP:-127.0.0.1}:8080
-    restart: always
-
   web:
     build:
       context: ./web
