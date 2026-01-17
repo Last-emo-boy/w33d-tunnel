@@ -2,6 +2,11 @@
 
 # deploy.sh - One-click deployment for w33d-tunnel Cloud Platform
 
+# Default configuration
+export NODE_ID="node-$(hostname)"
+# Try to detect public IP
+export PUBLIC_IP=$(curl -s http://checkip.amazonaws.com || echo "127.0.0.1")
+
 echo "Checking dependencies..."
 if ! command -v docker &> /dev/null; then
     echo "Docker could not be found. Please install Docker first."
@@ -13,6 +18,11 @@ if ! command -v docker-compose &> /dev/null; then
     exit 1
 fi
 
+echo "Deploying with configuration:"
+echo "  NODE_ID:   $NODE_ID"
+echo "  PUBLIC_IP: $PUBLIC_IP"
+echo ""
+
 echo "Building and Starting Services..."
 docker-compose down
 docker-compose up -d --build
@@ -22,6 +32,7 @@ echo "---------------------------------------------------"
 echo "Services are running on:"
 echo "  - Frontend: 127.0.0.1:7729"
 echo "  - API:      127.0.0.1:2933"
+echo "  - Tunnel:   $PUBLIC_IP:8080 (UDP)"
 echo ""
 echo "Please configure your main Nginx to proxy 'cloud.w33d.xyz' to 127.0.0.1:7729"
 echo "Example Nginx Config:"
