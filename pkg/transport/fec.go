@@ -53,7 +53,7 @@ func (e *FECEncoder) Encode(packet []byte) ([][]byte, error) {
 		pktCopy = pktCopy[:len(packet)]
 	}
 	copy(pktCopy, packet)
-	
+
 	e.shards[e.shardCount] = pktCopy
 	if len(pktCopy) > e.maxShardSize {
 		e.maxShardSize = len(pktCopy)
@@ -64,7 +64,7 @@ func (e *FECEncoder) Encode(packet []byte) ([][]byte, error) {
 	if e.shardCount == FECDataShards {
 		return e.flush()
 	}
-	
+
 	return nil, nil
 }
 
@@ -78,18 +78,18 @@ func (e *FECEncoder) flush() ([][]byte, error) {
 			e.shards[i] = append(shard, padding...)
 		}
 	}
-	
+
 	// 2. Allocate parity shards
 	for i := FECDataShards; i < FECBlockSize; i++ {
 		e.shards[i] = make([]byte, e.maxShardSize)
 	}
-	
+
 	// 3. Encode
 	if err := e.enc.Encode(e.shards); err != nil {
 		e.reset()
 		return nil, err
 	}
-	
+
 	// 4. Extract Parity
 	parity := make([][]byte, FECParityShards)
 	for i := 0; i < FECParityShards; i++ {
@@ -99,7 +99,7 @@ func (e *FECEncoder) flush() ([][]byte, error) {
 		// We need to return them.
 		// The caller will use them and then discard.
 		// We can't easily pool the *slice of slices* return value, but we can pool the data.
-		
+
 		src := e.shards[FECDataShards+i]
 		p := GetBuffer2K()
 		if len(src) > cap(p) {
@@ -110,7 +110,7 @@ func (e *FECEncoder) flush() ([][]byte, error) {
 		copy(p, src)
 		parity[i] = p
 	}
-	
+
 	e.reset()
 	return parity, nil
 }
@@ -127,19 +127,19 @@ func (e *FECEncoder) reset() {
 	for i := FECDataShards; i < FECBlockSize; i++ {
 		e.shards[i] = nil
 	}
-	
+
 	e.shardCount = 0
 	e.maxShardSize = 0
 }
 
 // FECDecoder handles Forward Error Correction decoding/recovery.
 type FECDecoder struct {
-	dec           reedsolomon.Encoder // Same interface
-	blockShards   [][]byte
-	blockPresent  []bool
-	blockCount    int
-	mutex         sync.Mutex
-	
+	dec          reedsolomon.Encoder // Same interface
+	blockShards  [][]byte
+	blockPresent []bool
+	blockCount   int
+	mutex        sync.Mutex
+
 	// State tracking
 	currentGroup uint64
 }
@@ -160,19 +160,19 @@ func NewFECDecoder() (*FECDecoder, error) {
 // If it's a Data packet, returns it immediately.
 // If it's a Parity packet, buffers it and tries to recover lost data packets.
 // Returns recovered packets if any.
-// 
+//
 // Note: This requires packets to carry FEC Group information.
 func (d *FECDecoder) HandlePacket(packet []byte, header protocol.Header) ([][]byte, error) {
 	// Payload Wrapper: [Group(8)][Index(1)][Content]
 	if len(packet) < 9 {
 		return nil, errors.New("packet too short for FEC wrapper")
 	}
-	
+
 	group := binary.BigEndian.Uint64(packet[0:8])
 	index := int(packet[8])
-	
+
 	isParity := (header.Flags & protocol.FlagFEC) != 0
-	
+
 	// Reset if new group
 	if group > d.currentGroup {
 		// New group started. Old group is abandoned (incomplete).
@@ -182,27 +182,29 @@ func (d *FECDecoder) HandlePacket(packet []byte, header protocol.Header) ([][]by
 		// Old packet. Ignore.
 		return nil, nil
 	}
-	
+
 	// Current Group
 	if isParity {
 		// Parity packet logic
 		// Index 10, 11, 12...
 		// In wrapper, index is already correct (10+).
-		
+
 		if index < FECDataShards {
 			// Invalid parity index
 			return nil, nil
 		}
-		
+
 		// Store Parity
 		// We store the WHOLE wrapper or just Content?
 		// Reconstruct needs same-sized shards.
 		// If we store Wrapper, we recover Wrapper.
 		// That's what we want!
-		
+
 		slot := index
-		if slot >= FECBlockSize { return nil, nil }
-		
+		if slot >= FECBlockSize {
+			return nil, nil
+		}
+
 		if !d.blockPresent[slot] {
 			// Store Copy
 			c := make([]byte, len(packet))
@@ -211,15 +213,15 @@ func (d *FECDecoder) HandlePacket(packet []byte, header protocol.Header) ([][]by
 			d.blockPresent[slot] = true
 			d.blockCount++
 		}
-		
+
 	} else {
 		// Data Packet
 		// Index 0..9
-		
+
 		if index >= FECDataShards {
 			return nil, nil
 		}
-		
+
 		if !d.blockPresent[index] {
 			// Store Copy
 			c := make([]byte, len(packet))
@@ -228,11 +230,11 @@ func (d *FECDecoder) HandlePacket(packet []byte, header protocol.Header) ([][]by
 			d.blockPresent[index] = true
 			d.blockCount++
 		}
-		
+
 		// Return immediately (No delay!)
 		// Caller handles unwrapping.
 	}
-	
+
 	// Check for Recovery
 	// We need 10 shards.
 	if d.blockCount >= FECDataShards {
@@ -244,7 +246,7 @@ func (d *FECDecoder) HandlePacket(packet []byte, header protocol.Header) ([][]by
 				break
 			}
 		}
-		
+
 		if hasHoles {
 			// Recover!
 			// Reconstruct requires all shards to be same size.
@@ -257,7 +259,7 @@ func (d *FECDecoder) HandlePacket(packet []byte, header protocol.Header) ([][]by
 					maxSize = len(d.blockShards[i])
 				}
 			}
-			
+
 			// Pad existing
 			for i := 0; i < FECBlockSize; i++ {
 				if d.blockPresent[i] && len(d.blockShards[i]) < maxSize {
@@ -269,13 +271,13 @@ func (d *FECDecoder) HandlePacket(packet []byte, header protocol.Header) ([][]by
 					d.blockShards[i] = nil // Ensure nil
 				}
 			}
-			
+
 			// Reconstruct
 			if err := d.dec.Reconstruct(d.blockShards); err != nil {
 				logger.Debug("FEC Reconstruct failed: %v", err)
 				return nil, nil // Return nothing (can't recover)
 			}
-			
+
 			// Collect Recovered Packets
 			var recovered [][]byte
 			for i := 0; i < FECDataShards; i++ {
@@ -290,23 +292,23 @@ func (d *FECDecoder) HandlePacket(packet []byte, header protocol.Header) ([][]by
 					// Yes.
 					// But our protocol parser ignores trailing bytes after PayloadLen.
 					// So extra zeros are fine!
-					
+
 					recPkt := d.blockShards[i]
 					recovered = append(recovered, recPkt)
-					
+
 					// Mark as present
 					d.blockPresent[i] = true
 					d.blockCount++
 				}
 			}
-			
+
 			if len(recovered) > 0 {
 				logger.Debug("FEC Recovered %d packets in group %d", len(recovered), group)
 			}
 			return recovered, nil
 		}
 	}
-	
+
 	return nil, nil
 }
 

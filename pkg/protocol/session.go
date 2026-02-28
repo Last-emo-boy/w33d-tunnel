@@ -44,7 +44,7 @@ type Session struct {
 	EphemeralPub     []byte
 	PeerEphemeralPub []byte
 
-	PresharedKey  []byte
+	PresharedKey []byte
 
 	// Session Keys (Read-only after handshake)
 	SendKey       []byte
@@ -57,26 +57,26 @@ type Session struct {
 	// Sequence Numbers (Protected by respective locks)
 	SendSeq uint64
 	RecvSeq uint64 // Highest received
-	
+
 	// Sliding Window for Replay Protection
 	// Window size 1024.
 	// We use a []uint64 bitmap. 1024 bits = 16 * 64-bit integers.
-	RecvWindow [16]uint64 
+	RecvWindow [16]uint64
 
 	RemoteAddr net.Addr
 	LastActive time.Time
 
 	// Rate Limiter
 	RateLimiter *rate.Limiter
-	
+
 	// FEC
-	FECEncoder interface{
+	FECEncoder interface {
 		Encode(packet []byte) ([][]byte, error)
 	}
-	FECDecoder interface{
+	FECDecoder interface {
 		HandlePacket(packet []byte, header Header) ([][]byte, error)
 	}
-	FECSeq     uint64
+	FECSeq uint64
 
 	// Tenant Info
 	Token string
@@ -193,51 +193,51 @@ func (s *Session) ValidateRecvSeq(seq uint64) bool {
 			// Actually, typical implementation:
 			// RecvSeq is the Right Edge of the window.
 			// When RecvSeq moves right, we clear the bits that fell off?
-			// 
+			//
 			// Optimization:
 			// We only need to check if `seq` is in [RecvSeq - 1023, RecvSeq].
 			// If seq > RecvSeq, it is valid. We update RecvSeq.
 			// But we need to mark it as seen.
-			
+
 			// Let's do the shifting.
 			shift := uint64(diff)
-			
+
 			// Shift the whole array left by `shift` bits.
 			// Since 1024 is small, we can just loop.
 			// Or simplified:
 			// We don't shift. We just use modulo?
 			// No, modulo doesn't handle the "moving window" naturally for replay check.
-			// 
+			//
 			// Let's implement the shift.
 			// Move bits from lower indices to higher?
 			// Window: [Oldest ... Newest]
 			// If we shift "left" (Newest moves), we are actually shifting in 0s at the new position.
-			// 
+			//
 			// Let's use the standard "IPSec" style window.
 			// RecvSeq is the highest seen.
 			// We track `seq` relative to RecvSeq.
-			
+
 			// First, handle the shift logic by clearing old bits?
 			// Actually, we just need to shift the bitmap.
 			// Doing a 1024-bit shift is expensive.
-			// 
+			//
 			// Alternative: Ring Buffer.
 			// Index = seq % 1024.
 			// But we need to handle "wrapping" and clearing old values.
-			// 
+			//
 			// Let's stick to the shift, but optimize.
 			// If diff > 64, we shift whole uint64s.
-			
+
 			// Shift Logic:
 			// We want to shift LEFT by `diff`.
 			// `RecvWindow` represents [RecvSeq-1023 ... RecvSeq] ?
 			// Let's say bit 0 is RecvSeq. Bit 1 is RecvSeq-1.
 			// If RecvSeq increases by 1, Bit 0 becomes Bit 1.
 			// So we shift LEFT (<<).
-			
+
 			wordsShift := shift / 64
 			bitsShift := shift % 64
-			
+
 			if wordsShift > 0 {
 				for i := 15; i >= int(wordsShift); i-- {
 					s.RecvWindow[i] = s.RecvWindow[i-int(wordsShift)]
@@ -246,7 +246,7 @@ func (s *Session) ValidateRecvSeq(seq uint64) bool {
 					s.RecvWindow[i] = 0
 				}
 			}
-			
+
 			if bitsShift > 0 {
 				carry := uint64(0)
 				for i := 0; i < 16; i++ {
@@ -256,7 +256,7 @@ func (s *Session) ValidateRecvSeq(seq uint64) bool {
 				}
 			}
 		}
-		
+
 		s.RecvSeq = seq
 		// Mark current (Bit 0)
 		s.RecvWindow[0] |= 1
@@ -269,16 +269,16 @@ func (s *Session) ValidateRecvSeq(seq uint64) bool {
 		if diff >= 1024 {
 			return false // Too old
 		}
-		
+
 		// Check bit
 		wordIdx := diff / 64
 		bitIdx := diff % 64
-		
+
 		mask := uint64(1) << bitIdx
 		if (s.RecvWindow[wordIdx] & mask) != 0 {
 			return false // Replay
 		}
-		
+
 		// Mark seen
 		s.RecvWindow[wordIdx] |= mask
 		return true
@@ -342,7 +342,7 @@ func (s *Session) DecryptPacket(data []byte, windowSize uint64) (*DataPacket, ui
 	// Replay Protection / Window Check
 	// Since we decrypted successfully, the packet is authentic.
 	// We just need to track the sequence number.
-	
+
 	if !s.ValidateRecvSeq(seq) {
 		// Decrypted fine but replay. Drop.
 		// However, we already spent CPU decrypting. This is acceptable to prevent DoS on State.

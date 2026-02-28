@@ -17,9 +17,9 @@ func main() {
 
 	// Create application with options
 	err := wails.Run(&options.App{
-		Title:  "w33d-tunnel",
-		Width:  480,
-		Height: 720,
+		Title:         "w33d-tunnel",
+		Width:         480,
+		Height:        720,
 		DisableResize: false,
 		AssetServer: &assetserver.Options{
 			Assets: assets,

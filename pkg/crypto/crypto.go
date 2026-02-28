@@ -8,9 +8,9 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
-	"math/big"
 	"errors"
 	"io"
+	"math/big"
 
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/curve25519"

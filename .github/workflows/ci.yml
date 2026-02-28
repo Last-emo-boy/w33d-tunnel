@@ -15,15 +15,16 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.22'
+        go-version-file: 'go.mod'
 
-    - name: Build
-      run: |
-        go build -v ./cmd/client
-        go build -v ./cmd/server
+    - name: Format Check
+      run: bash ./tools/fmt.sh --check
 
-    - name: Test
-      run: go test -v ./...
+    - name: Build All CLI Binaries (Host Platform)
+      run: bash ./tools/build_binaries.sh dist
+
+    - name: Core Test Profile
+      run: bash ./tools/test_core.sh
 
     - name: Vet
       run: go vet ./...

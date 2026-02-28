@@ -91,21 +91,21 @@ func BuildDataPacket(key, nonce []byte, header Header, payload []byte) ([]byte, 
 	// - IP + UDP Headers (20+8=28)
 	// Total Overhead ~ 64 bytes.
 	// 1280 + 64 = 1344 < 1350 (Safe MTU for PPPoE/VPNs)
-	
+
 	currentSize := len(plaintext)
 	overhead := 24 // 16 tag + 8 seq
-	
+
 	// Define Buckets (Target Total Sizes)
 	buckets := []int{128, 256, 512, 768, 1024, 1280}
-	
+
 	targetSize := 0
 	for _, b := range buckets {
-		if currentSize + overhead <= b {
+		if currentSize+overhead <= b {
 			targetSize = b
 			break
 		}
 	}
-	
+
 	// If packet is larger than largest bucket, pad to MTU (1350) or just add small random padding
 	if targetSize == 0 {
 		// Just random padding 0-31 bytes to break exact length
@@ -114,12 +114,12 @@ func BuildDataPacket(key, nonce []byte, header Header, payload []byte) ([]byte, 
 			targetSize = 1350 // Cap at Safe MTU
 		}
 	}
-	
+
 	padLen := targetSize - (currentSize + overhead)
 	if padLen < 0 {
 		padLen = 0 // Should not happen if logic is correct
 	}
-	
+
 	if padLen > 0 {
 		padding := crypto.RandomBytes(padLen)
 		plaintext = append(plaintext, padding...)
@@ -135,7 +135,7 @@ func BuildDataPacket(key, nonce []byte, header Header, payload []byte) ([]byte, 
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// MTU Check Warning
 	// Overhead = 16 (Poly1305) + 8 (Seq) = 24 bytes minimum + Header Size + Padding
 	if len(ciphertext) > 1450 {

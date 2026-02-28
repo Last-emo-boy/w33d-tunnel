@@ -43,8 +43,8 @@ func (s *Session) CreateHandshakeInitiation() ([]byte, error) {
 	if tokenLen > 255 {
 		return nil, errors.New("token too long")
 	}
-	
-	payload := make([]byte, 1+8+1+tokenLen+32) 
+
+	payload := make([]byte, 1+8+1+tokenLen+32)
 	payload[0] = 1 // Version
 	// Timestamp...
 	copy(payload[1:], crypto.RandomBytes(8))
@@ -189,18 +189,18 @@ func (s *Session) ProcessHandshakeInitiation(data []byte) ([]byte, error) {
 	if err != nil {
 		return nil, errors.New("failed to decrypt initiation")
 	}
-	
+
 	// Parse Payload: [Version 1b] [Timestamp 8b] [TokenLen 1b] [Token var] [Padding...]
 	if len(decrypted) < 10 {
 		return nil, errors.New("payload too short")
 	}
-	
+
 	// version := decrypted[0]
 	tokenLen := int(decrypted[9])
 	if len(decrypted) < 10+tokenLen {
 		return nil, errors.New("payload too short for token")
 	}
-	
+
 	s.Token = string(decrypted[10 : 10+tokenLen])
 	// TODO: Validate Token here or later?
 	// For now, we just store it in Session.

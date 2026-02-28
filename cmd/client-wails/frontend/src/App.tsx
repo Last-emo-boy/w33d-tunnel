@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
-import { LoadConfig, Connect, Disconnect } from "../wailsjs/go/main/App";
+import { ControllerApplyKernelConfig, ControllerGetKernelConfig, ControllerGetKernelRuntimeStats, ControllerResetKernelRuntimeStats, LoadConfig, Connect, Disconnect, CreateKernelProfile, DeleteKernelProfile, GetKernelControllerState, GetKernelProfiles, GetKernelRuntimeStats, ListKernelProfileRevisions, LoadKernelProfile, ProbeKernelRoute, ResetKernelRuntimeStats, RollbackKernelProfile, SaveKernelProfile, SetActiveKernelProfile, ValidateKernelConfig } from "../wailsjs/go/main/App";
 import { EventsOn } from "../wailsjs/runtime/runtime";
-import { Shield, Zap, Power, Activity, Settings, Terminal, Globe, ArrowUp, ArrowDown } from 'lucide-react';
+import { Shield, Zap, Power, Activity, Settings, Terminal, Globe, ArrowUp, ArrowDown, FileCode2 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
@@ -85,15 +85,115 @@ const formatBytes = (bytes: number) => {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 };
 
+type KernelValidationResult = {
+  valid: boolean;
+  message: string;
+  outbounds: number;
+  rules: number;
+  default_target: string;
+};
+
+type KernelProfileState = {
+  active: string;
+  profiles: string[];
+};
+
+type KernelProfileRevision = {
+  id: string;
+  created_at: string;
+  bytes: number;
+};
+
+type KernelRouteProbeResult = {
+  ok: boolean;
+  message: string;
+  matched: boolean;
+  rule: string;
+  outbound: string;
+  adapter_type: string;
+  trace: Array<{
+    index: number;
+    rule: string;
+    outbound: string;
+    matched: boolean;
+  }>;
+};
+
+type KernelRuntimeStats = {
+  profile: string;
+  version: number;
+  total_routes: number;
+  matched_routes: number;
+  default_routes: number;
+  last_rule: string;
+  last_outbound: string;
+  outbound_hits: Record<string, number>;
+  adapter_health: Record<string, string>;
+};
+
+type KernelControllerState = {
+  running: boolean;
+  profile: string;
+  url: string;
+  require_auth: boolean;
+  write: boolean;
+};
+
 function App() {
   const [config, setConfig] = useState({ sub_url: '', socks_addr: ':1080', global_proxy: false, auto_start: false });
   const [status, setStatus] = useState('disconnected');
   const [stats, setStats] = useState({ bytes_tx: 0, bytes_rx: 0 });
   const [logs, setLogs] = useState<string[]>([]);
+  const [kernelConfig, setKernelConfig] = useState('');
+  const [kernelProfiles, setKernelProfiles] = useState<string[]>([]);
+  const [activeKernelProfile, setActiveKernelProfile] = useState<string>('');
+  const [newKernelProfileName, setNewKernelProfileName] = useState('');
+  const [kernelFormat, setKernelFormat] = useState<'yaml' | 'json'>('yaml');
+  const [kernelRevisions, setKernelRevisions] = useState<KernelProfileRevision[]>([]);
+  const [selectedKernelRevision, setSelectedKernelRevision] = useState('');
+  const [kernelValidation, setKernelValidation] = useState<KernelValidationResult | null>(null);
+  const [kernelProbeHost, setKernelProbeHost] = useState('');
+  const [kernelProbeIP, setKernelProbeIP] = useState('');
+  const [kernelProbePort, setKernelProbePort] = useState('443');
+  const [kernelProbeNetwork, setKernelProbeNetwork] = useState<'tcp' | 'udp'>('tcp');
+  const [kernelProbeResult, setKernelProbeResult] = useState<KernelRouteProbeResult | null>(null);
+  const [kernelRuntimeStats, setKernelRuntimeStats] = useState<KernelRuntimeStats | null>(null);
+  const [kernelControllerState, setKernelControllerState] = useState<KernelControllerState | null>(null);
+  const [kernelBusy, setKernelBusy] = useState(false);
   const logsEndRef = useRef<HTMLDivElement>(null);
+
+  const refreshKernelProfiles = async () => {
+    const state = await GetKernelProfiles() as KernelProfileState;
+    setKernelProfiles(state.profiles || []);
+    setActiveKernelProfile(state.active || '');
+    const content = await LoadKernelProfile(state.active || '');
+    setKernelConfig(content);
+    await refreshKernelControllerState(state.active || '');
+    const revisions = await ListKernelProfileRevisions(state.active || '') as KernelProfileRevision[];
+    setKernelRevisions(revisions || []);
+    setSelectedKernelRevision((revisions && revisions.length > 0) ? revisions[0].id : '');
+  };
+
+  const refreshKernelRevisions = async (profile: string) => {
+    const revisions = await ListKernelProfileRevisions(profile || '') as KernelProfileRevision[];
+    setKernelRevisions(revisions || []);
+    setSelectedKernelRevision((revisions && revisions.length > 0) ? revisions[0].id : '');
+  };
+
+  const refreshKernelControllerState = async (profile: string) => {
+    if (!profile) {
+      setKernelControllerState(null);
+      return;
+    }
+    const state = await GetKernelControllerState(profile) as KernelControllerState;
+    setKernelControllerState(state);
+  };
 
   useEffect(() => {
     LoadConfig().then(setConfig);
+    refreshKernelProfiles().catch((e) => {
+      setLogs(p => [...p, `[KERNEL] Failed to load profiles: ${e}`]);
+    });
     EventsOn("log", (msg: string) => setLogs(p => [...p, msg].slice(-1000)));
     EventsOn("stats", (s: any) => setStats(s));
     EventsOn("disconnected", () => setStatus('disconnected'));
@@ -102,6 +202,29 @@ function App() {
         setLogs(p => [...p, `ERROR: ${err}`]);
     });
   }, []);
+
+  useEffect(() => {
+    if (!activeKernelProfile) return;
+    let disposed = false;
+    const tick = async () => {
+      try {
+        const s = await ControllerGetKernelRuntimeStats(activeKernelProfile) as KernelRuntimeStats;
+        if (!disposed) setKernelRuntimeStats(s);
+      } catch (e) {
+        try {
+          const direct = await GetKernelRuntimeStats(activeKernelProfile) as KernelRuntimeStats;
+          if (!disposed) setKernelRuntimeStats(direct);
+        } catch (_) {
+        }
+      }
+    };
+    tick();
+    const id = setInterval(tick, 2000);
+    return () => {
+      disposed = true;
+      clearInterval(id);
+    };
+  }, [activeKernelProfile]);
 
   useEffect(() => {
     logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -120,6 +243,205 @@ function App() {
         setStatus('disconnected');
         setLogs(p => [...p, `ERROR: ${e}`]);
       }
+    }
+  };
+
+  const handleKernelValidate = async () => {
+    setKernelBusy(true);
+    try {
+      const result = await ValidateKernelConfig(kernelConfig, kernelFormat);
+      setKernelValidation(result as KernelValidationResult);
+      setLogs(p => [...p, result.valid ? "[KERNEL] Config validation passed" : `[KERNEL] Validation failed: ${result.message}`]);
+    } catch (e: any) {
+      setKernelValidation({ valid: false, message: String(e), outbounds: 0, rules: 0, default_target: '' });
+      setLogs(p => [...p, `[KERNEL] Validation error: ${e}`]);
+    } finally {
+      setKernelBusy(false);
+    }
+  };
+
+  const handleKernelSave = async () => {
+    setKernelBusy(true);
+    try {
+      await SaveKernelProfile(activeKernelProfile, kernelConfig);
+      await refreshKernelRevisions(activeKernelProfile);
+      setLogs(p => [...p, `[KERNEL] Config saved (${activeKernelProfile})`]);
+    } catch (e: any) {
+      setLogs(p => [...p, `[KERNEL] Save failed: ${e}`]);
+    } finally {
+      setKernelBusy(false);
+    }
+  };
+
+  const handleKernelProfileSwitch = async (profile: string) => {
+    if (!profile) return;
+    setKernelBusy(true);
+    try {
+      await SetActiveKernelProfile(profile);
+      const content = await LoadKernelProfile(profile);
+      setActiveKernelProfile(profile);
+      setKernelConfig(content);
+      setKernelValidation(null);
+      await refreshKernelControllerState(profile);
+      await refreshKernelRevisions(profile);
+      setLogs(p => [...p, `[KERNEL] Switched active profile -> ${profile}`]);
+    } catch (e: any) {
+      setLogs(p => [...p, `[KERNEL] Switch profile failed: ${e}`]);
+    } finally {
+      setKernelBusy(false);
+    }
+  };
+
+  const handleKernelProfileCreate = async () => {
+    const name = newKernelProfileName.trim();
+    if (!name) return;
+    setKernelBusy(true);
+    try {
+      await CreateKernelProfile(name);
+      await refreshKernelProfiles();
+      await SetActiveKernelProfile(name);
+      const content = await LoadKernelProfile(name);
+      setActiveKernelProfile(name);
+      setKernelConfig(content);
+      setNewKernelProfileName('');
+      setKernelValidation(null);
+      await refreshKernelControllerState(name);
+      await refreshKernelRevisions(name);
+      setLogs(p => [...p, `[KERNEL] Created profile: ${name}`]);
+    } catch (e: any) {
+      setLogs(p => [...p, `[KERNEL] Create profile failed: ${e}`]);
+    } finally {
+      setKernelBusy(false);
+    }
+  };
+
+  const handleKernelProfileDelete = async () => {
+    if (!activeKernelProfile || activeKernelProfile === "default") return;
+    setKernelBusy(true);
+    try {
+      await DeleteKernelProfile(activeKernelProfile);
+      await refreshKernelProfiles();
+      setKernelValidation(null);
+      setKernelRevisions([]);
+      setSelectedKernelRevision('');
+      setLogs(p => [...p, `[KERNEL] Deleted profile: ${activeKernelProfile}`]);
+    } catch (e: any) {
+      setLogs(p => [...p, `[KERNEL] Delete profile failed: ${e}`]);
+    } finally {
+      setKernelBusy(false);
+    }
+  };
+
+  const handleKernelProbe = async () => {
+    setKernelBusy(true);
+    try {
+      const port = parseInt(kernelProbePort, 10) || 0;
+      const result = await ProbeKernelRoute(activeKernelProfile, kernelProbeHost, kernelProbeIP, port, kernelProbeNetwork) as KernelRouteProbeResult;
+      setKernelProbeResult(result);
+      if (result.ok) {
+        setLogs(p => [...p, `[KERNEL] Probe -> outbound=${result.outbound}, rule=${result.rule}`]);
+      } else {
+        setLogs(p => [...p, `[KERNEL] Probe failed: ${result.message}`]);
+      }
+    } catch (e: any) {
+      setKernelProbeResult({
+        ok: false,
+        message: String(e),
+        matched: false,
+        rule: "",
+        outbound: "",
+        adapter_type: "",
+        trace: [],
+      });
+      setLogs(p => [...p, `[KERNEL] Probe error: ${e}`]);
+    } finally {
+      setKernelBusy(false);
+    }
+  };
+
+  const handleKernelStatsReset = async () => {
+    if (!activeKernelProfile) return;
+    setKernelBusy(true);
+    try {
+      const s = await ControllerResetKernelRuntimeStats(activeKernelProfile) as KernelRuntimeStats;
+      setKernelRuntimeStats(s);
+      setLogs(p => [...p, `[KERNEL] Controller runtime reset (${activeKernelProfile})`]);
+    } catch (e: any) {
+      try {
+        await ResetKernelRuntimeStats(activeKernelProfile);
+        const fallback = await GetKernelRuntimeStats(activeKernelProfile) as KernelRuntimeStats;
+        setKernelRuntimeStats(fallback);
+        setLogs(p => [...p, `[KERNEL] Fallback runtime reset (${activeKernelProfile})`]);
+      } catch (fallbackErr: any) {
+        setLogs(p => [...p, `[KERNEL] Reset stats failed: ${fallbackErr || e}`]);
+      }
+    } finally {
+      setKernelBusy(false);
+    }
+  };
+
+  const handleControllerRefreshRuntime = async () => {
+    if (!activeKernelProfile) return;
+    setKernelBusy(true);
+    try {
+      const s = await ControllerGetKernelRuntimeStats(activeKernelProfile) as KernelRuntimeStats;
+      setKernelRuntimeStats(s);
+      await refreshKernelControllerState(activeKernelProfile);
+      setLogs(p => [...p, `[KERNEL] Controller runtime refreshed (${activeKernelProfile})`]);
+    } catch (e: any) {
+      setLogs(p => [...p, `[KERNEL] Controller runtime refresh failed: ${e}`]);
+    } finally {
+      setKernelBusy(false);
+    }
+  };
+
+  const handleControllerLoadConfig = async () => {
+    if (!activeKernelProfile) return;
+    setKernelBusy(true);
+    try {
+      const content = await ControllerGetKernelConfig(activeKernelProfile);
+      setKernelConfig(content);
+      setKernelFormat('json');
+      setKernelValidation(null);
+      setLogs(p => [...p, `[KERNEL] Controller config loaded as JSON (${activeKernelProfile})`]);
+    } catch (e: any) {
+      setLogs(p => [...p, `[KERNEL] Controller config load failed: ${e}`]);
+    } finally {
+      setKernelBusy(false);
+    }
+  };
+
+  const handleControllerApplyConfig = async () => {
+    if (!activeKernelProfile) return;
+    setKernelBusy(true);
+    try {
+      await ControllerApplyKernelConfig(activeKernelProfile, kernelFormat, kernelConfig);
+      const s = await ControllerGetKernelRuntimeStats(activeKernelProfile) as KernelRuntimeStats;
+      setKernelRuntimeStats(s);
+      await refreshKernelControllerState(activeKernelProfile);
+      await refreshKernelRevisions(activeKernelProfile);
+      setLogs(p => [...p, `[KERNEL] Controller applied config to runtime (${activeKernelProfile})`]);
+    } catch (e: any) {
+      setLogs(p => [...p, `[KERNEL] Controller apply failed: ${e}`]);
+    } finally {
+      setKernelBusy(false);
+    }
+  };
+
+  const handleKernelRollback = async () => {
+    if (!activeKernelProfile || !selectedKernelRevision) return;
+    setKernelBusy(true);
+    try {
+      await RollbackKernelProfile(activeKernelProfile, selectedKernelRevision);
+      const content = await LoadKernelProfile(activeKernelProfile);
+      setKernelConfig(content);
+      setKernelValidation(null);
+      await refreshKernelRevisions(activeKernelProfile);
+      setLogs(p => [...p, `[KERNEL] Rolled back profile ${activeKernelProfile} to revision ${selectedKernelRevision}`]);
+    } catch (e: any) {
+      setLogs(p => [...p, `[KERNEL] Rollback failed: ${e}`]);
+    } finally {
+      setKernelBusy(false);
     }
   };
 
@@ -242,6 +564,271 @@ function App() {
                 {status === 'connected' ? 'DISCONNECT' : status === 'connecting' ? 'CONNECTING...' : 'CONNECT'}
               </span>
             </button>
+          </div>
+        </Card>
+
+        {/* Kernel Config Card */}
+        <Card className="space-y-4 flex-none">
+          <div className="flex items-center justify-between mb-2 pb-2 border-b border-gray-100">
+            <div className="flex items-center space-x-2">
+              <FileCode2 size={18} className="text-gray-400" />
+              <h2 className="text-sm font-bold text-gray-700 uppercase tracking-wider">Kernel Config</h2>
+            </div>
+            <div className="flex items-center space-x-2 text-xs">
+              <button
+                className={cn("px-2.5 py-1 rounded border", kernelFormat === 'yaml' ? "bg-blue-50 border-blue-300 text-blue-700" : "bg-white border-gray-200 text-gray-600")}
+                onClick={() => setKernelFormat('yaml')}
+              >
+                YAML
+              </button>
+              <button
+                className={cn("px-2.5 py-1 rounded border", kernelFormat === 'json' ? "bg-blue-50 border-blue-300 text-blue-700" : "bg-white border-gray-200 text-gray-600")}
+                onClick={() => setKernelFormat('json')}
+              >
+                JSON
+              </button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-[1fr_auto_auto] gap-2">
+            <select
+              className="h-9 rounded-lg border border-gray-300 bg-white px-2 text-sm"
+              value={activeKernelProfile}
+              onChange={(e: any) => handleKernelProfileSwitch(e.target.value)}
+              disabled={kernelBusy}
+            >
+              {kernelProfiles.map((p) => (
+                <option key={p} value={p}>{p}</option>
+              ))}
+            </select>
+            <button
+              className="h-9 px-3 rounded-lg border border-gray-300 bg-white text-sm hover:bg-gray-50 disabled:opacity-50"
+              onClick={handleKernelProfileDelete}
+              disabled={kernelBusy || activeKernelProfile === "default"}
+            >
+              Delete
+            </button>
+            <button
+              className="h-9 px-3 rounded-lg border border-gray-300 bg-white text-sm hover:bg-gray-50 disabled:opacity-50"
+              onClick={refreshKernelProfiles}
+              disabled={kernelBusy}
+            >
+              Refresh
+            </button>
+          </div>
+
+          <div className="grid grid-cols-[1fr_auto] gap-2">
+            <input
+              className="h-9 rounded-lg border border-gray-300 bg-white px-2 text-sm"
+              placeholder="new profile name (letters/numbers/-_.)"
+              value={newKernelProfileName}
+              onChange={(e: any) => setNewKernelProfileName(e.target.value)}
+              disabled={kernelBusy}
+            />
+            <button
+              className="h-9 px-3 rounded-lg bg-blue-600 text-white text-sm hover:bg-blue-700 disabled:opacity-50"
+              onClick={handleKernelProfileCreate}
+              disabled={kernelBusy || !newKernelProfileName.trim()}
+            >
+              Create
+            </button>
+          </div>
+
+          <div className="grid grid-cols-[1fr_auto_auto] gap-2 items-center">
+            <select
+              className="h-9 rounded-lg border border-gray-300 bg-white px-2 text-sm"
+              value={selectedKernelRevision}
+              onChange={(e: any) => setSelectedKernelRevision(e.target.value)}
+              disabled={kernelBusy || kernelRevisions.length === 0}
+            >
+              {kernelRevisions.length === 0 && (
+                <option value="">no revisions</option>
+              )}
+              {kernelRevisions.map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.created_at} ({r.bytes}B)
+                </option>
+              ))}
+            </select>
+            <button
+              className="h-9 px-3 rounded-lg border border-gray-300 bg-white text-sm hover:bg-gray-50 disabled:opacity-50"
+              onClick={() => refreshKernelRevisions(activeKernelProfile)}
+              disabled={kernelBusy || !activeKernelProfile}
+            >
+              Revisions
+            </button>
+            <button
+              className="h-9 px-3 rounded-lg bg-amber-600 text-white text-sm hover:bg-amber-700 disabled:opacity-50"
+              onClick={handleKernelRollback}
+              disabled={kernelBusy || !activeKernelProfile || !selectedKernelRevision}
+            >
+              Rollback
+            </button>
+          </div>
+
+          <textarea
+            className="w-full h-48 bg-gray-950 text-gray-100 text-xs font-mono rounded-lg p-3 border border-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+            value={kernelConfig}
+            onChange={(e: any) => setKernelConfig(e.target.value)}
+            spellCheck={false}
+          />
+
+          <div className="flex items-center justify-between gap-3">
+            <div className="text-xs text-gray-500">
+              Native desktop kernel config editor (profile: {activeKernelProfile || "none"}).
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                className="px-3 py-2 rounded-lg border border-gray-300 text-gray-700 text-sm hover:bg-gray-50 disabled:opacity-50"
+                onClick={handleKernelValidate}
+                disabled={kernelBusy}
+              >
+                Validate
+              </button>
+              <button
+                className="px-3 py-2 rounded-lg bg-blue-600 text-white text-sm hover:bg-blue-700 disabled:opacity-50"
+                onClick={handleKernelSave}
+                disabled={kernelBusy}
+              >
+                Save
+              </button>
+              <button
+                className="px-3 py-2 rounded-lg bg-indigo-600 text-white text-sm hover:bg-indigo-700 disabled:opacity-50"
+                onClick={handleControllerApplyConfig}
+                disabled={kernelBusy || !activeKernelProfile}
+              >
+                Controller Apply
+              </button>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-indigo-200 bg-indigo-50/40 px-3 py-2 text-xs text-indigo-900 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="font-semibold">Local Controller</span>
+              <span className="font-mono text-[11px]">
+                {kernelControllerState?.running ? `running@${kernelControllerState.url}` : "not running"}
+              </span>
+            </div>
+            <div className="font-mono break-all">
+              profile={kernelControllerState?.profile || activeKernelProfile || "-"} auth={String(kernelControllerState?.require_auth ?? false)} write={String(kernelControllerState?.write ?? false)}
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                className="px-2.5 py-1.5 rounded border border-indigo-300 bg-white text-indigo-700 text-[11px] hover:bg-indigo-50 disabled:opacity-50"
+                onClick={handleControllerRefreshRuntime}
+                disabled={kernelBusy || !activeKernelProfile}
+              >
+                Runtime
+              </button>
+              <button
+                className="px-2.5 py-1.5 rounded border border-indigo-300 bg-white text-indigo-700 text-[11px] hover:bg-indigo-50 disabled:opacity-50"
+                onClick={handleControllerLoadConfig}
+                disabled={kernelBusy || !activeKernelProfile}
+              >
+                Load Config
+              </button>
+            </div>
+          </div>
+
+          {kernelValidation && (
+            <div className={cn(
+              "text-xs rounded-lg px-3 py-2 border",
+              kernelValidation.valid ? "bg-green-50 border-green-200 text-green-700" : "bg-red-50 border-red-200 text-red-700"
+            )}>
+              {kernelValidation.valid
+                ? `Valid. outbounds=${kernelValidation.outbounds}, rules=${kernelValidation.rules}, default=${kernelValidation.default_target}`
+                : `Invalid: ${kernelValidation.message}`}
+            </div>
+          )}
+        </Card>
+
+        {/* Kernel Route Probe Card */}
+        <Card className="space-y-3 flex-none">
+          <div className="flex items-center space-x-2 mb-1 pb-2 border-b border-gray-100">
+            <FileCode2 size={16} className="text-gray-400" />
+            <h3 className="text-xs font-bold text-gray-700 uppercase tracking-wider">Kernel Route Probe</h3>
+          </div>
+
+          <div className="grid grid-cols-[1fr_1fr] gap-2">
+            <input
+              className="h-9 rounded-lg border border-gray-300 bg-white px-2 text-sm"
+              placeholder="host (e.g. api.telegram.org)"
+              value={kernelProbeHost}
+              onChange={(e: any) => setKernelProbeHost(e.target.value)}
+              disabled={kernelBusy}
+            />
+            <input
+              className="h-9 rounded-lg border border-gray-300 bg-white px-2 text-sm"
+              placeholder="ip (optional)"
+              value={kernelProbeIP}
+              onChange={(e: any) => setKernelProbeIP(e.target.value)}
+              disabled={kernelBusy}
+            />
+          </div>
+
+          <div className="grid grid-cols-[1fr_1fr_auto] gap-2">
+            <input
+              className="h-9 rounded-lg border border-gray-300 bg-white px-2 text-sm"
+              placeholder="port"
+              value={kernelProbePort}
+              onChange={(e: any) => setKernelProbePort(e.target.value)}
+              disabled={kernelBusy}
+            />
+            <select
+              className="h-9 rounded-lg border border-gray-300 bg-white px-2 text-sm"
+              value={kernelProbeNetwork}
+              onChange={(e: any) => setKernelProbeNetwork(e.target.value as 'tcp' | 'udp')}
+              disabled={kernelBusy}
+            >
+              <option value="tcp">tcp</option>
+              <option value="udp">udp</option>
+            </select>
+            <button
+              className="h-9 px-3 rounded-lg bg-indigo-600 text-white text-sm hover:bg-indigo-700 disabled:opacity-50"
+              onClick={handleKernelProbe}
+              disabled={kernelBusy}
+            >
+              Probe
+            </button>
+          </div>
+
+          {kernelProbeResult && (
+            <div className={cn(
+              "text-xs rounded-lg px-3 py-2 border",
+              kernelProbeResult.ok ? "bg-indigo-50 border-indigo-200 text-indigo-700" : "bg-red-50 border-red-200 text-red-700"
+            )}>
+              {kernelProbeResult.ok
+                ? `outbound=${kernelProbeResult.outbound}, adapter=${kernelProbeResult.adapter_type}, rule=${kernelProbeResult.rule}, matched=${String(kernelProbeResult.matched)}`
+                : `probe failed: ${kernelProbeResult.message}`}
+            </div>
+          )}
+
+          {kernelProbeResult?.ok && kernelProbeResult.trace && kernelProbeResult.trace.length > 0 && (
+            <div className="rounded-lg border border-indigo-200 bg-indigo-50/40 px-3 py-2 text-xs text-indigo-900 space-y-1">
+              <div className="font-semibold">Rule Trace</div>
+              {kernelProbeResult.trace.map((step, idx) => (
+                <div key={`${step.index}-${idx}`} className={cn("font-mono break-all", step.matched ? "text-indigo-800" : "text-indigo-500")}>
+                  {(step.index >= 0 ? `#${step.index + 1}` : "default")} {step.rule} =&gt; {step.outbound} [{step.matched ? "match" : "skip"}]
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-700 space-y-1">
+            <div className="flex items-center justify-between">
+              <span className="font-semibold">Runtime Counters</span>
+              <button
+                className="px-2 py-1 rounded border border-gray-300 bg-white text-[11px] hover:bg-gray-50 disabled:opacity-50"
+                onClick={handleKernelStatsReset}
+                disabled={kernelBusy || !activeKernelProfile}
+              >
+                Reset
+              </button>
+            </div>
+            <div>version={kernelRuntimeStats?.version ?? 0} total={kernelRuntimeStats?.total_routes ?? 0} matched={kernelRuntimeStats?.matched_routes ?? 0} default={kernelRuntimeStats?.default_routes ?? 0}</div>
+            <div>last_outbound={kernelRuntimeStats?.last_outbound || "-"} last_rule={kernelRuntimeStats?.last_rule || "-"}</div>
+            <div className="font-mono break-all">hits={JSON.stringify(kernelRuntimeStats?.outbound_hits || {})}</div>
+            <div className="font-mono break-all">health={JSON.stringify(kernelRuntimeStats?.adapter_health || {})}</div>
           </div>
         </Card>
 

@@ -15,25 +15,28 @@ jobs:
       matrix:
         goos: [linux, windows, darwin]
         goarch: [amd64, arm64]
-        exclude:
-          - goos: windows
-            goarch: arm64
     steps:
     - uses: actions/checkout@v4
 
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.22'
+        go-version-file: 'go.mod'
 
-    - name: Build
+    - name: Build All CLI Binaries
       run: |
-        mkdir -p dist
-        GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o dist/client-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/client
-        GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o dist/server-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/server
-        if [ "${{ matrix.goos }}" = "windows" ]; then
-          mv dist/client-${{ matrix.goos }}-${{ matrix.goarch }} dist/client-${{ matrix.goos }}-${{ matrix.goarch }}.exe
-          mv dist/server-${{ matrix.goos }}-${{ matrix.goarch }} dist/server-${{ matrix.goos }}-${{ matrix.goarch }}.exe
+        GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} bash ./tools/build_binaries.sh dist
+
+    - name: Generate Checksums
+      run: |
+        (cd dist && sha256sum * > SHA256SUMS-${{ matrix.goos }}-${{ matrix.goarch }}.txt)
+
+    - name: Assert No Task/TODO Docs In Artifacts
+      run: |
+        if find dist -maxdepth 1 -type f \( -name "TODO*" -o -name "*task*" -o -name "*.md" \) | grep -q .; then
+          echo "unexpected doc files in dist"
+          find dist -maxdepth 1 -type f
+          exit 1
         fi
 
     - name: Upload Artifacts

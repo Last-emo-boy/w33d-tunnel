@@ -31,13 +31,83 @@ go build -o client ./cmd/client
 go build -o server ./cmd/server
 ```
 
+## Local Stack (Manager + Server + Web)
+
+Start everything locally with one command:
+
+```powershell
+./tools/local_stack.ps1 up
+```
+
+or
+
+```bash
+./tools/local_stack.sh up
+```
+
+Useful actions: `up`, `down`, `logs`, `status`.
+
+After stack startup, run a smoke check:
+
+```powershell
+./tools/e2e_smoke.ps1
+```
+
+or
+
+```bash
+./tools/e2e_smoke.sh
+```
+
 ## Usage
 
 ### 1. Server Setup
 Run the server on your remote VPS. It will automatically detect your public IP.
 
 ```bash
-./server -port 8080
+./server -port 8080 -admin-secret <ADMIN_SECRET>
+```
+
+If you use the manager service, the default manager endpoint is:
+
+```text
+http://127.0.0.1:2933
+```
+
+Override it with `-manager` when needed.
+
+To protect server-to-manager node APIs, enable a shared secret:
+
+```bash
+# manager
+MANAGER_NODE_SECRET=<secret> ./manager
+
+# server
+./server -manager http://127.0.0.1:2933 -manager-secret <secret>
+```
+
+For `/admin/kick`, send `X-Admin-Secret: <ADMIN_SECRET>`; if `-admin-secret` is not set, the endpoint is disabled.
+
+Runtime metrics are exposed at `GET /metrics` on the same admin port (default `:8090`).
+
+Strict mode (recommended for production) enforces secrets at startup:
+
+```bash
+# manager
+MANAGER_STRICT_AUTH=1 MANAGER_NODE_SECRET=<secret> ./manager
+
+# server
+./server -strict-auth -manager-secret <secret> -admin-secret <admin_secret>
+```
+
+Secret rotation window is supported with comma-separated values:
+
+```bash
+# manager accepts old + new during rollout
+MANAGER_NODE_SECRET=old-secret,new-secret ./manager
+
+# server admin endpoint accepts old + new during rollout
+./server -admin-secret old-admin,new-admin
 ```
 
 **Output:**
@@ -79,6 +149,77 @@ The protocol is designed to look like high-entropy random UDP packets.
 3.  **Reliability**:
     *   Implements Selective Repeat ARQ.
     *   Supports "Unreliable" mode for UDP-over-UDP to avoid Head-of-Line blocking.
+
+## Kernel Roadmap
+
+Clash-like kernel evolution notes and milestones are tracked in:
+
+- `spec/clash-like-kernel.md`
+- `spec/tasks.md` (`Clash-like Kernel Evolution` section)
+- `spec/native-desktop-ui.md` (native UI priority, non-web primary)
+- `spec/secret-rotation.md` (control-plane secret rotation procedure)
+
+Current kernel baseline now includes config hot reload and rule provider expansion (`routing.rule_providers` + `type: provider`).
+Kernel DNS/FakeIP policy baseline is available (`DNSPolicy` + `FakeIPPool` with runtime DNS decision hook).
+Kernel TUN ingress skeleton is available with lifecycle + metadata dispatch baseline.
+Kernel local controller skeleton is also available with read-only runtime/config endpoints.
+
+## Core Test Profile
+
+Use the stable core test profile locally and in CI:
+
+```bash
+./tools/test_core.sh
+```
+
+or
+
+```powershell
+./tools/test_core.ps1
+```
+
+## Formatting
+
+Check formatting:
+
+```powershell
+./tools/fmt.ps1 --check
+```
+
+or
+
+```bash
+bash ./tools/fmt.sh --check
+```
+
+Apply formatting:
+
+```powershell
+./tools/fmt.ps1
+```
+
+## Build All CLI Binaries
+
+Build all CLI binaries (`client`, `server`, `manager`, `bench`, `http_bench`, `fetch_page`) for current platform:
+
+```powershell
+./tools/build_binaries.ps1 dist
+```
+
+or
+
+```bash
+bash ./tools/build_binaries.sh dist
+```
+
+GitHub Release workflow uploads only files generated under `dist/` (binary artifacts + checksums), not `TODO`/`task`/`spec` docs.
+
+## Native Desktop UI
+
+The primary operator UI direction is native desktop (Wails), not a browser dashboard.
+Current desktop baseline includes tunnel controls, kernel config editing, kernel profile management (create/switch/delete), route probing diagnostics, and live runtime counters/adapter health.
+Desktop route probe also includes rule trace chain visibility for first-match diagnostics.
+Desktop kernel workspace now supports profile revision history and rollback.
 
 ## Roadmap
 

@@ -2,50 +2,108 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
+	"bytes"
+	"encoding/json"
+	"net/http"
 	"w33d-tunnel/pkg/crypto"
 	"w33d-tunnel/pkg/logger"
 	"w33d-tunnel/pkg/transport"
-	"net/http"
-	"bytes"
-	"encoding/json"
 
 	quic "github.com/quic-go/quic-go"
 )
 
 var (
-	port    = flag.Int("port", 8080, "Listen port")
-	keyHex  = flag.String("key", "", "Server Private Key (Hex). If empty, generates random.")
-	verbose = flag.Bool("v", false, "Verbose logging")
-	simLoss = flag.Int("sim-loss", 0, "Simulate Packet Loss % (0-100)")
-	managerAddr = flag.String("manager", "http://127.0.0.1:3000", "Manager Address")
-	nodeID      = flag.String("node-id", "node-1", "Node ID")
-	advertised  = flag.String("advertised-addr", "", "Advertised Address (host:port) for clients to connect. If empty, uses 127.0.0.1:port")
+	port          = flag.Int("port", 8080, "Listen port")
+	keyHex        = flag.String("key", "", "Server Private Key (Hex). If empty, generates random.")
+	verbose       = flag.Bool("v", false, "Verbose logging")
+	simLoss       = flag.Int("sim-loss", 0, "Simulate Packet Loss % (0-100)")
+	managerAddr   = flag.String("manager", "http://127.0.0.1:2933", "Manager Address")
+	managerSecret = flag.String("manager-secret", "", "Shared secret for manager API authentication")
+	adminSecret   = flag.String("admin-secret", "", "Shared secret for /admin/kick (sent via X-Admin-Secret)")
+	strictAuth    = flag.Bool("strict-auth", false, "Require manager/admin secrets at startup")
+	nodeID        = flag.String("node-id", "node-1", "Node ID")
+	advertised    = flag.String("advertised-addr", "", "Advertised Address (host:port) for clients to connect. If empty, uses 127.0.0.1:port")
 )
 
-func startPingServer(port int, conn *transport.ServerObfuscatedPacketConn) {
+type sessionKicker interface {
+	CloseSessionByToken(token string)
+	GetMetrics() map[string]uint64
+}
+
+func parseSecretList(raw string) []string {
+	parts := strings.Split(raw, ",")
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		secret := strings.TrimSpace(p)
+		if secret == "" {
+			continue
+		}
+		if _, ok := seen[secret]; ok {
+			continue
+		}
+		seen[secret] = struct{}{}
+		out = append(out, secret)
+	}
+	return out
+}
+
+func secretInList(secret string, allowed []string) bool {
+	if strings.TrimSpace(secret) == "" || len(allowed) == 0 {
+		return false
+	}
+	matched := 0
+	for _, s := range allowed {
+		if subtle.ConstantTimeCompare([]byte(secret), []byte(s)) == 1 {
+			matched = 1
+		}
+	}
+	return matched == 1
+}
+
+func newPingAdminHandler(conn sessionKicker, secrets []string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("pong"))
 	})
-	
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(conn.GetMetrics())
+	})
+
 	// Admin Kick API
 	// POST /admin/kick?token=xxx
-	// TODO: Add Auth (Local secret?)
 	mux.HandleFunc("/admin/kick", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			http.Error(w, "Method not allowed", 405)
+			return
+		}
+		if len(secrets) == 0 {
+			http.Error(w, "Admin kick disabled", http.StatusServiceUnavailable)
+			return
+		}
+		providedSecret := r.Header.Get("X-Admin-Secret")
+		if !secretInList(providedSecret, secrets) {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
 		token := r.URL.Query().Get("token")
@@ -53,13 +111,17 @@ func startPingServer(port int, conn *transport.ServerObfuscatedPacketConn) {
 			http.Error(w, "Token required", 400)
 			return
 		}
-		
+
 		conn.CloseSessionByToken(token)
 		logger.Info("Kicked session for token: %s", token)
 		w.WriteHeader(200)
 		w.Write([]byte("ok"))
 	})
+	return mux
+}
 
+func startPingServer(port int, conn *transport.ServerObfuscatedPacketConn, secrets []string) {
+	mux := newPingAdminHandler(conn, secrets)
 	logger.Info("Ping/Admin Server started on :%d", port)
 	http.ListenAndServe(fmt.Sprintf(":%d", port), mux)
 }
@@ -74,11 +136,23 @@ func getPublicIP() string {
 	return string(ip)
 }
 
+func newManagerRequest(method, path string, body io.Reader) (*http.Request, error) {
+	req, err := http.NewRequest(method, *managerAddr+path, body)
+	if err != nil {
+		return nil, err
+	}
+	managerSecrets := parseSecretList(*managerSecret)
+	if len(managerSecrets) > 0 {
+		req.Header.Set("X-Node-Secret", managerSecrets[0])
+	}
+	return req, nil
+}
+
 func registerToManager(pub []byte) {
 	// Construct Payload
 	// We need our public address. For now, assume localhost or config.
 	// Addr should be "host:port" reachable by client.
-	
+
 	addr := *advertised
 	if addr == "" {
 		// Try to auto-discover public IP
@@ -100,19 +174,26 @@ func registerToManager(pub []byte) {
 		"addr":    addr, // Use configured address
 		"pub_key": hex.EncodeToString(pub),
 	}
-	
+
 	jsonData, _ := json.Marshal(payload)
-	
+
 	// Helper to send request
 	send := func() {
 		logger.Info("Registering node to Manager: %s", *managerAddr+"/api/register_node")
-		resp, err := http.Post(*managerAddr+"/api/register_node", "application/json", bytes.NewBuffer(jsonData))
+		req, err := newManagerRequest(http.MethodPost, "/api/register_node", bytes.NewBuffer(jsonData))
+		if err != nil {
+			logger.Error("Registration request build failed: %v", err)
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			logger.Error("Registration failed: %v", err)
 			return
 		}
 		defer resp.Body.Close()
-		
+
 		if resp.StatusCode != 200 {
 			body, _ := io.ReadAll(resp.Body)
 			logger.Error("Registration returned status %d: %s", resp.StatusCode, string(body))
@@ -123,10 +204,10 @@ func registerToManager(pub []byte) {
 
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
-	
+
 	// Initial
 	send()
-	
+
 	for range ticker.C {
 		send()
 	}
@@ -135,36 +216,43 @@ func registerToManager(pub []byte) {
 func runTrafficReporter(conn *transport.ServerObfuscatedPacketConn) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
-	
+
 	for range ticker.C {
 		// Get Stats from SessionManager
 		// We need to access conn.SessionManager
 		// But it is private.
 		// Let's rely on `conn.GetSessionStats()` which we will add.
-		
+
 		stats := conn.GetSessionStats()
 		if len(stats) == 0 {
 			continue
 		}
-		
+
 		// Post to Manager
 		// Payload: { "node_id": "...", "stats": [ { "token": "...", "read": 123, "write": 456 } ] }
 		payload := map[string]interface{}{
 			"node_id": *nodeID,
 			"stats":   stats,
 		}
-		
+
 		jsonData, _ := json.Marshal(payload)
-		resp, err := http.Post(*managerAddr+"/api/report", "application/json", bytes.NewBuffer(jsonData))
+		req, err := newManagerRequest(http.MethodPost, "/api/report", bytes.NewBuffer(jsonData))
+		if err != nil {
+			logger.Error("Failed to build report request: %v", err)
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			logger.Error("Failed to report stats: %v", err)
 			continue
 		}
-		
+
 		// Reset stats if report successful
 		// Wait, GetSessionStats() does NOT reset stats in current implementation of ServerObfuscatedPacketConn?
 		// We need to check pkg/transport/server_conn.go
-		
+
 		if resp.StatusCode != 200 {
 			logger.Error("Report stats returned %d", resp.StatusCode)
 		}
@@ -175,55 +263,73 @@ func runTrafficReporter(conn *transport.ServerObfuscatedPacketConn) {
 func runUserSync(conn *transport.ServerObfuscatedPacketConn) {
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
-	
+
 	// Initial Sync
 	sync := func() {
-		resp, err := http.Get(*managerAddr + "/api/sync_users")
+		req, err := newManagerRequest(http.MethodGet, "/api/sync_users", nil)
+		if err != nil {
+			logger.Error("Failed to build sync request: %v", err)
+			return
+		}
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			logger.Error("Sync users failed: %v", err)
 			return
 		}
 		defer resp.Body.Close()
-		
+
 		var payload struct {
 			Users []struct {
-				Token      string `json:"token"`
-				QuotaBytes int64  `json:"quota_bytes"`
-				UsedBytes  int64  `json:"used_bytes"`
-				BandwidthLimit int64 `json:"bandwidth_limit"`
+				Token          string `json:"token"`
+				QuotaBytes     int64  `json:"quota_bytes"`
+				UsedBytes      int64  `json:"used_bytes"`
+				BandwidthLimit int64  `json:"bandwidth_limit"`
 			} `json:"users"`
 		}
-		
+
 		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 			logger.Error("Sync users parse failed: %v", err)
 			return
 		}
-		
+
 		// Convert to map
 		tokens := make(map[string]transport.QuotaInfo)
 		for _, u := range payload.Users {
 			tokens[u.Token] = transport.QuotaInfo{
-				QuotaBytes: u.QuotaBytes,
-				UsedBytes:  u.UsedBytes,
+				QuotaBytes:     u.QuotaBytes,
+				UsedBytes:      u.UsedBytes,
 				BandwidthLimit: u.BandwidthLimit,
 			}
 		}
-		
+
 		// Get Manager
 		// We need to access conn.manager.
 		// conn.GetSessionManager().UpdateValidTokens(tokens)
 		// But Manager is private.
 		// Let's add GetSessionManager() to ServerObfuscatedPacketConn.
 		conn.UpdateValidTokens(tokens)
-		
+
 		logger.Info("Synced %d users from Manager", len(tokens))
 	}
-	
+
 	sync()
-	
+
 	for range ticker.C {
 		sync()
 	}
+}
+
+func validateAuthConfig(strict bool, managerSecretVal, adminSecretVal string) error {
+	if !strict {
+		return nil
+	}
+	if len(parseSecretList(managerSecretVal)) == 0 {
+		return errors.New("strict auth requires -manager-secret")
+	}
+	if len(parseSecretList(adminSecretVal)) == 0 {
+		return errors.New("strict auth requires -admin-secret")
+	}
+	return nil
 }
 
 type QUICConnection interface {
@@ -235,15 +341,19 @@ type QUICConnection interface {
 
 func main() {
 	flag.Parse()
-	
+
 	if *verbose {
 		logger.SetLevel(logger.LevelDebug)
 	}
-	
+	if err := validateAuthConfig(*strictAuth, *managerSecret, *adminSecret); err != nil {
+		logger.Error("Auth config invalid: %v", err)
+		os.Exit(1)
+	}
+
 	// Server Static Key
 	var priv []byte
 	var err error
-	
+
 	if *keyHex != "" {
 		priv, err = hex.DecodeString(*keyHex)
 		if err != nil {
@@ -257,65 +367,71 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	
+
 	// Derive Public Key
 	pub, _ := crypto.GetPublicKey(priv)
-	
+
 	// Print Server Info
 	printServerInfo(pub)
-	
+
 	// 1. Listen UDP
 	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", *port))
 	if err != nil {
 		logger.Error("Resolve UDP failed: %v", err)
 		os.Exit(1)
 	}
-	
+
 	udpConn, err := net.ListenUDP("udp", addr)
 	if err != nil {
 		logger.Error("Listen UDP failed: %v", err)
 		os.Exit(1)
 	}
-	
+
 	// Start Traffic Reporter
 	// Ideally this should communicate with Manager.
 	// For now, we just print stats to stdout/logger, or write to a file.
 	// We need access to the SessionManager.
 	// But SessionManager is inside ServerObfuscatedPacketConn.
 	// We need to expose it or pass a callback.
-	
+
 	// Let's modify NewServerObfuscatedPacketConn to return SessionManager?
 	// Or just use the instance.
-	
+
 	logger.Info("Server Started on port %d", *port)
 	if *simLoss > 0 {
 		logger.Warn("Packet Loss Simulation Enabled: %d%%", *simLoss)
 	}
-	
+	adminSecrets := parseSecretList(*adminSecret)
+	if len(adminSecrets) == 0 {
+		logger.Warn("Admin kick endpoint is disabled (set -admin-secret to enable it)")
+	} else if len(adminSecrets) > 1 {
+		logger.Info("Admin secret rotation window enabled (%d active secrets)", len(adminSecrets))
+	}
+
 	// ServerObfuscatedPacketConn
 	serverConn := transport.NewServerObfuscatedPacketConn(udpConn, priv, *simLoss)
-	
+
 	// Start Ping Endpoint
-	go startPingServer(8090, serverConn) // Hardcoded for now
-	
+	go startPingServer(8090, serverConn, adminSecrets) // Hardcoded for now
+
 	// Register to Manager
 	go registerToManager(pub)
-	
+
 	// Start Reporter
 	go runTrafficReporter(serverConn)
 	go runUserSync(serverConn)
-	
+
 	// TLS Config for QUIC (Inner Layer)
 	// We can generate self-signed certs because we trust the Outer Layer authentication.
 	// Or use the keys we already have.
 	tlsConfig := crypto.GenerateTLSConfig()
 	tlsConfig.NextProtos = []string{"w33d-tunnel"}
-	
+
 	quicConfig := &quic.Config{
-		MaxIdleTimeout: 30 * time.Second,
-		KeepAlivePeriod: 10 * time.Second,
+		MaxIdleTimeout:       30 * time.Second,
+		KeepAlivePeriod:      10 * time.Second,
 		HandshakeIdleTimeout: 15 * time.Second,
-		EnableDatagrams: true,
+		EnableDatagrams:      true,
 	}
 
 	listener, err := quic.Listen(serverConn, tlsConfig, quicConfig)
@@ -330,7 +446,7 @@ func main() {
 			logger.Error("Accept error: %v", err)
 			continue
 		}
-		
+
 		go handleQUICSession(conn)
 	}
 }
@@ -338,20 +454,20 @@ func main() {
 func handleQUICSession(c any) {
 	conn := c.(QUICConnection)
 	logger.Info("New QUIC Connection from %s", conn.RemoteAddr())
-	
+
 	// StreamMap is now implicit (QUIC Streams)
 	// We just accept streams and datagrams.
-	
+
 	// Handle Datagrams in background
 	go handleDatagrams(conn)
-	
+
 	for {
 		stream, err := conn.AcceptStream(context.Background())
 		if err != nil {
 			logger.Debug("AcceptStream error: %v", err)
 			return
 		}
-		
+
 		go handleStream(stream)
 	}
 }
@@ -373,14 +489,14 @@ func handleDatagrams(conn QUICConnection) {
 	// The `natTable` should be per-QUIC-Connection ideally.
 	// But `handleUDPProxy` was global function.
 	// Let's make `natTable` local to `handleDatagrams` (per client session).
-	
+
 	localNatTable := make(map[uint32]*UDPNatSession)
 	var natMutex sync.Mutex
-	
+
 	// Cleanup Routine
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	
+
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
@@ -414,22 +530,22 @@ func handleDatagrams(conn QUICConnection) {
 			natMutex.Unlock()
 			return
 		}
-		
+
 		// Handle UDP Packet
 		// Protocol: [FlowID(4)][AddrLen][Addr][Data]
 		if len(data) < 5 {
 			continue
 		}
-		
+
 		flowID := binary.BigEndian.Uint32(data[0:4])
 		addrLen := int(data[4])
 		if len(data) < 5+addrLen {
 			continue
 		}
-		
+
 		targetAddr := string(data[5 : 5+addrLen])
 		payload := data[5+addrLen:]
-		
+
 		natMutex.Lock()
 		sess, exists := localNatTable[flowID]
 		if !exists {
@@ -439,20 +555,20 @@ func handleDatagrams(conn QUICConnection) {
 				natMutex.Unlock()
 				continue
 			}
-			
+
 			// Dial
 			c, err := net.DialUDP("udp", nil, uAddr)
 			if err != nil {
 				natMutex.Unlock()
 				continue
 			}
-			
+
 			sess = &UDPNatSession{
 				Conn:       c,
 				LastActive: time.Now(),
 			}
 			localNatTable[flowID] = sess
-			
+
 			// Start Reader for this Flow
 			go func(id uint32, c *net.UDPConn, target string) {
 				buf := make([]byte, 2048)
@@ -469,30 +585,30 @@ func handleDatagrams(conn QUICConnection) {
 						c.Close()
 						return
 					}
-					
+
 					// Update Activity
 					natMutex.Lock()
 					if s, ok := localNatTable[id]; ok {
 						s.LastActive = time.Now()
 					}
 					natMutex.Unlock()
-					
+
 					// Send back
 					// Format: [FlowID(4)][AddrLen][Addr][Data]
 					flowIDBytes := make([]byte, 4)
 					binary.BigEndian.PutUint32(flowIDBytes, id)
-					
+
 					respMeta := append(flowIDBytes, byte(len(target)))
 					respMeta = append(respMeta, []byte(target)...)
 					resp := append(respMeta, buf[:n]...)
-					
+
 					conn.SendDatagram(resp)
 				}
 			}(flowID, c, targetAddr)
 		}
 		sess.LastActive = time.Now()
 		natMutex.Unlock()
-		
+
 		// Write to Target
 		sess.Conn.Write(payload)
 	}
@@ -509,16 +625,16 @@ func handleStream(stream *quic.Stream) {
 		return
 	}
 	addrLen := int(buf[0])
-	
+
 	addrBuf := make([]byte, addrLen)
 	if _, err := io.ReadFull(stream, addrBuf); err != nil {
 		stream.Close()
 		return
 	}
 	targetAddr := string(addrBuf)
-	
+
 	logger.Debug("Proxying to %s", targetAddr)
-	
+
 	// Connect to Target
 	// Use default dialer with timeout and KeepAlive
 	d := net.Dialer{
@@ -531,7 +647,7 @@ func handleStream(stream *quic.Stream) {
 		stream.Close()
 		return
 	}
-	
+
 	// Pipe
 	go func() {
 		defer targetConn.Close()

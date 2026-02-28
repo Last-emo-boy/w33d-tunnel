@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 	"w33d-tunnel/pkg/protocol"
 
@@ -19,11 +20,21 @@ type SessionManager struct {
 	sessions   map[string]*protocol.Session
 	lock       sync.RWMutex
 	stopChan   chan struct{}
-	
+
 	// Valid Tokens Cache
-	tokenLock   sync.RWMutex
-	validTokens map[string]QuotaInfo
+	tokenLock    sync.RWMutex
+	validTokens  map[string]QuotaInfo
 	activeCounts map[string]int
+
+	metrics sessionMetrics
+}
+
+type sessionMetrics struct {
+	sessionsEstablished    uint64
+	handshakeRejectInvalid uint64
+	handshakeRejectQuota   uint64
+	handshakeRejectMaxIPs  uint64
+	policyDisconnects      uint64
 }
 
 type QuotaInfo struct {
@@ -35,10 +46,10 @@ type QuotaInfo struct {
 
 func NewSessionManager(serverPriv []byte) *SessionManager {
 	sm := &SessionManager{
-		serverPriv:  serverPriv,
-		sessions:    make(map[string]*protocol.Session),
-		stopChan:    make(chan struct{}),
-		validTokens: make(map[string]QuotaInfo),
+		serverPriv:   serverPriv,
+		sessions:     make(map[string]*protocol.Session),
+		stopChan:     make(chan struct{}),
+		validTokens:  make(map[string]QuotaInfo),
 		activeCounts: make(map[string]int),
 	}
 	go sm.cleanupLoop()
@@ -48,7 +59,7 @@ func NewSessionManager(serverPriv []byte) *SessionManager {
 func (sm *SessionManager) cleanupLoop() {
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
-	
+
 	for {
 		select {
 		case <-sm.stopChan:
@@ -77,13 +88,13 @@ func (sm *SessionManager) cleanupLoop() {
 func (sm *SessionManager) RegisterToken(token string) bool {
 	sm.tokenLock.Lock()
 	defer sm.tokenLock.Unlock()
-	
+
 	// Default limit: 8
 	limit := 8
 	if info, ok := sm.validTokens[token]; ok && info.MaxIPs > 0 {
 		limit = info.MaxIPs
 	}
-	
+
 	if sm.activeCounts[token] >= limit {
 		return false
 	}
@@ -102,7 +113,7 @@ func (sm *SessionManager) UnregisterToken(token string) {
 func (sm *SessionManager) CloseSessionByToken(token string) {
 	sm.lock.Lock()
 	defer sm.lock.Unlock()
-	
+
 	for k, s := range sm.sessions {
 		if s.Token == token {
 			// Found
@@ -112,7 +123,7 @@ func (sm *SessionManager) CloseSessionByToken(token string) {
 				sm.activeCounts[token]--
 			}
 			sm.tokenLock.Unlock()
-			
+
 			delete(sm.sessions, k)
 			// We can't easily close the UDP connection part, but removing from map stops traffic.
 		}
@@ -128,22 +139,22 @@ func (sm *SessionManager) GetSession(addr net.Addr) *protocol.Session {
 func (sm *SessionManager) CreateSession(addr net.Addr) *protocol.Session {
 	sm.lock.Lock()
 	defer sm.lock.Unlock()
-	
+
 	// Check again
 	if sess, ok := sm.sessions[addr.String()]; ok {
 		return sess
 	}
-	
+
 	// Create new server session (Client Key unknown yet, will be set during Handshake)
 	sess := protocol.NewSession(protocol.RoleServer, sm.serverPriv, nil)
 	sess.RemoteAddr = addr
-	
+
 	// Initialize FEC
 	enc, _ := NewFECEncoder()
 	dec, _ := NewFECDecoder()
 	sess.FECEncoder = enc
 	sess.FECDecoder = dec
-	
+
 	sm.sessions[addr.String()] = sess
 	return sess
 }
@@ -152,7 +163,7 @@ func (sm *SessionManager) UpdateValidTokens(tokens map[string]QuotaInfo) {
 	sm.tokenLock.Lock()
 	defer sm.tokenLock.Unlock()
 	sm.validTokens = tokens
-	
+
 	// Optional: Disconnect invalid or over-quota sessions immediately?
 	// Let's do it lazily in Read/Write or periodic cleanup.
 }
@@ -164,11 +175,72 @@ func (sm *SessionManager) CheckToken(token string) (bool, QuotaInfo) {
 	return ok, info
 }
 
+func (sm *SessionManager) ShouldDisconnectForPolicy(sess *protocol.Session) bool {
+	valid, quota := sm.CheckToken(sess.Token)
+	if !valid {
+		return true
+	}
+
+	// QuotaBytes is expected to be > 0 for managed users.
+	// If a zero/negative quota appears due to misconfiguration, treat as exhausted.
+	if quota.QuotaBytes <= 0 {
+		return true
+	}
+
+	totalUsed := quota.UsedBytes + int64(sess.BytesRead+sess.BytesWritten)
+	return totalUsed > quota.QuotaBytes
+}
+
+func (sm *SessionManager) RecordSessionEstablished() {
+	atomic.AddUint64(&sm.metrics.sessionsEstablished, 1)
+}
+
+func (sm *SessionManager) RecordHandshakeRejectInvalid() {
+	atomic.AddUint64(&sm.metrics.handshakeRejectInvalid, 1)
+}
+
+func (sm *SessionManager) RecordHandshakeRejectQuota() {
+	atomic.AddUint64(&sm.metrics.handshakeRejectQuota, 1)
+}
+
+func (sm *SessionManager) RecordHandshakeRejectMaxIPs() {
+	atomic.AddUint64(&sm.metrics.handshakeRejectMaxIPs, 1)
+}
+
+func (sm *SessionManager) RecordPolicyDisconnect() {
+	atomic.AddUint64(&sm.metrics.policyDisconnects, 1)
+}
+
+func (sm *SessionManager) SnapshotMetrics() map[string]uint64 {
+	sm.lock.RLock()
+	activeSessions := uint64(len(sm.sessions))
+	sm.lock.RUnlock()
+
+	sm.tokenLock.RLock()
+	var activeTokens uint64
+	for _, count := range sm.activeCounts {
+		if count > 0 {
+			activeTokens++
+		}
+	}
+	sm.tokenLock.RUnlock()
+
+	return map[string]uint64{
+		"active_sessions":                activeSessions,
+		"active_tokens":                  activeTokens,
+		"sessions_established_total":     atomic.LoadUint64(&sm.metrics.sessionsEstablished),
+		"handshake_reject_invalid_total": atomic.LoadUint64(&sm.metrics.handshakeRejectInvalid),
+		"handshake_reject_quota_total":   atomic.LoadUint64(&sm.metrics.handshakeRejectQuota),
+		"handshake_reject_max_ips_total": atomic.LoadUint64(&sm.metrics.handshakeRejectMaxIPs),
+		"policy_disconnects_total":       atomic.LoadUint64(&sm.metrics.policyDisconnects),
+	}
+}
+
 // ServerObfuscatedPacketConn wraps a UDP listener and handles multiplexing for multiple clients.
 // It intercepts Handshake packets and decrypts Data packets using the correct session.
 type ServerObfuscatedPacketConn struct {
-conn    *net.UDPConn
-	manager *SessionManager
+	conn        *net.UDPConn
+	manager     *SessionManager
 	lossPercent int
 }
 
@@ -184,13 +256,13 @@ func (s *ServerObfuscatedPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, e
 	for {
 		// Read raw UDP
 		buf := GetBuffer2K()
-		
+
 		nRead, addr, err := s.conn.ReadFromUDP(buf)
 		if err != nil {
 			PutBuffer2K(buf)
 			return 0, nil, err
 		}
-		
+
 		// Simulate Loss
 		if s.lossPercent > 0 {
 			if rand.Intn(100) < s.lossPercent {
@@ -199,7 +271,7 @@ func (s *ServerObfuscatedPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, e
 				continue
 			}
 		}
-		
+
 		// 1. Remove Fake Header
 		// We don't know the type yet? Or assume same as Client?
 		// For now assume RTP.
@@ -212,59 +284,61 @@ func (s *ServerObfuscatedPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, e
 		// Check Session
 		// Note: RemoteAddr is still the UDP source.
 		// But packet content is stripped.
-		
+
 		sess := s.manager.GetSession(addr)
-		
+
 		// If no session, it MUST be a Handshake Initiation or we drop it.
 		if sess == nil || sess.State == protocol.StateClosed {
 			if sess == nil {
 				sess = s.manager.CreateSession(addr)
 			}
-			
+
 			// Try to process as Handshake
 			resp, err := sess.ProcessHandshakeInitiation(rawPkt)
 			if err == nil {
-				// Handshake Success! 
-				
+				// Handshake Success!
+
 				// 1. Validate Token
-				// We need to parse token from Handshake? 
+				// We need to parse token from Handshake?
 				// ProcessHandshakeInitiation already set sess.Token.
 				if sess.Token == "" {
 					// Should not happen if success
 					PutBuffer2K(buf)
 					continue
 				}
-				
+
 				// Check against ValidTokens
 				// Allow if list is empty (bootstrap) or token is in list
 				// NOTE: For strict security, we should Block if list is empty but we have registered to Manager?
 				// Let's assume strict mode if we have at least 1 token.
 				// Or just Block if not found.
-				
+
 				valid, quota := s.manager.CheckToken(sess.Token)
 				if !valid {
+					s.manager.RecordHandshakeRejectInvalid()
 					// Check if we are in "Permissive Mode" (e.g. no sync yet)
 					// For now, Strict: Reject.
 					// But we already processed it... state is StateHandshake.
 					// We should Close it.
 					// Or better: ProcessHandshakeInitiation should return Token before changing state?
 					// It does. sess.Token is set.
-					
+
 					// Let's log warning?
 					// fmt.Println("Invalid Token:", sess.Token)
-					
+
 					// Drop packet, don't send response.
 					// Remove session.
 					s.manager.lock.Lock()
 					delete(s.manager.sessions, addr.String())
 					s.manager.lock.Unlock()
-					
+
 					PutBuffer2K(buf)
 					continue
 				}
-				
+
 				// Check Quota
 				if quota.UsedBytes >= quota.QuotaBytes {
+					s.manager.RecordHandshakeRejectQuota()
 					// Over quota
 					s.manager.lock.Lock()
 					delete(s.manager.sessions, addr.String())
@@ -272,9 +346,10 @@ func (s *ServerObfuscatedPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, e
 					PutBuffer2K(buf)
 					continue
 				}
-				
+
 				// Check Concurrency
 				if !s.manager.RegisterToken(sess.Token) {
+					s.manager.RecordHandshakeRejectMaxIPs()
 					// Too many connections
 					s.manager.lock.Lock()
 					delete(s.manager.sessions, addr.String())
@@ -282,16 +357,17 @@ func (s *ServerObfuscatedPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, e
 					PutBuffer2K(buf)
 					continue
 				}
-				
+
 				// Setup Rate Limiter
 				if quota.BandwidthLimit > 0 {
 					sess.RateLimiter = rate.NewLimiter(rate.Limit(quota.BandwidthLimit), int(quota.BandwidthLimit))
 				}
+				s.manager.RecordSessionEstablished()
 
 				// Send Response.
 				// We must ADD Fake Header to response too.
 				finalResp := AddFakeHeader(resp, FakeHeaderRTP)
-				
+
 				s.conn.WriteToUDP(finalResp, addr)
 				PutBuffer2K(buf)
 				continue
@@ -300,39 +376,35 @@ func (s *ServerObfuscatedPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, e
 				continue
 			}
 		}
-		
-	// Session Established. Decrypt.
+
+		// Session Established. Decrypt.
 		pkt, _, err := sess.DecryptPacket(rawPkt, 65535)
 		if err != nil {
 			// Decrypt failed. Drop.
 			PutBuffer2K(buf)
 			continue
 		}
-		
+
 		s.manager.AddStats(sess, uint64(len(rawPkt)), uint64(len(pkt.Payload)))
-		
-		// Check Quota Limit (Approximate)
-		// We check validTokens cache.
-		valid, quota := s.manager.CheckToken(sess.Token)
-		if valid {
-			totalUsed := quota.UsedBytes + int64(sess.BytesRead + sess.BytesWritten)
-			if totalUsed > quota.QuotaBytes {
-				// Disconnect
-				PutBuffer2K(buf)
-				// Remove session
-				s.manager.lock.Lock()
-				s.manager.UnregisterToken(sess.Token)
-				delete(s.manager.sessions, addr.String())
-				s.manager.lock.Unlock()
-				continue
-			}
+
+		// Enforce policy on each packet:
+		// - token must still exist in manager sync cache
+		// - quota must not be exceeded
+		if s.manager.ShouldDisconnectForPolicy(sess) {
+			PutBuffer2K(buf)
+			s.manager.RecordPolicyDisconnect()
+			s.manager.lock.Lock()
+			s.manager.UnregisterToken(sess.Token)
+			delete(s.manager.sessions, addr.String())
+			s.manager.lock.Unlock()
+			continue
 		}
 
 		// 2. Handle FEC
 		// If it's a FEC Parity packet, it will be handled by FECDecoder.
 		// If it's a Data packet, it will be returned.
 		// We might also get Recovered packets if a loss was detected and recovered.
-		
+
 		// Unwrap the payload to get FEC Group/Index.
 		// [Group(8)][Index(1)][Content]
 		if len(pkt.Payload) < 9 {
@@ -340,13 +412,13 @@ func (s *ServerObfuscatedPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, e
 			PutBuffer2K(buf)
 			continue
 		}
-		
+
 		recovered, err := sess.FECDecoder.HandlePacket(pkt.Payload, pkt.Header)
 		if err != nil {
 			PutBuffer2K(buf)
 			continue
 		}
-		
+
 		if (pkt.Header.Flags & protocol.FlagFEC) != 0 {
 			// Parity Packet. Consumed.
 			// If recovered packets available, return one.
@@ -367,7 +439,7 @@ func (s *ServerObfuscatedPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, e
 				PutBuffer2K(buf)
 				return len(data), addr, nil
 			}
-			
+
 			PutBuffer2K(buf)
 			continue
 		}
@@ -376,9 +448,9 @@ func (s *ServerObfuscatedPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, e
 		// Unwrap and return
 		// We assume that HandlePacket processed it (stored for potential recovery)
 		// but we still need to deliver it immediately.
-		
+
 		realPayload := pkt.Payload[9:]
-	
+
 		// Copy payload (QUIC packet) to p
 		if len(realPayload) > len(p) {
 			PutBuffer2K(buf)
@@ -398,7 +470,7 @@ func (s *ServerObfuscatedPacketConn) WriteTo(p []byte, addr net.Addr) (n int, er
 	if sess == nil {
 		return 0, errors.New("no session")
 	}
-	
+
 	return s.writeToInternal(p, addr, sess)
 }
 
@@ -416,24 +488,24 @@ func (s *ServerObfuscatedPacketConn) writeToInternal(p []byte, addr net.Addr, se
 	}
 
 	// Use FEC Encoder
-	
+
 	fecSeq := sess.FECSeq
 	sess.FECSeq++
-	
+
 	group := fecSeq / uint64(FECDataShards)
 	index := int(fecSeq) % int(FECDataShards)
-	
+
 	// 1. Feed RAW payload to FEC Encoder
 	parityShards, err := sess.FECEncoder.Encode(p)
 	if err != nil {
 		return 0, err
 	}
-	
+
 	// 2. Send Data Packet (Wrapped)
 	if err := s.sendWrapped(p, group, byte(index), addr, protocol.FlagData, sess); err != nil {
 		return 0, err
 	}
-	
+
 	// 3. Send Parity if any
 	if parityShards != nil {
 		for i, shard := range parityShards {
@@ -445,22 +517,22 @@ func (s *ServerObfuscatedPacketConn) writeToInternal(p []byte, addr net.Addr, se
 			PutBuffer2K(shard)
 		}
 	}
-	
+
 	return len(p), nil
 }
 
 func (s *ServerObfuscatedPacketConn) sendWrapped(p []byte, group uint64, index byte, addr net.Addr, flags uint8, sess *protocol.Session) error {
 	wrapped := GetBuffer2K()
-	if len(p) + 9 > cap(wrapped) {
+	if len(p)+9 > cap(wrapped) {
 		wrapped = make([]byte, len(p)+9)
 	} else {
 		wrapped = wrapped[:len(p)+9]
 	}
-	
+
 	binary.BigEndian.PutUint64(wrapped[0:8], group)
 	wrapped[8] = index
 	copy(wrapped[9:], p)
-	
+
 	// Encrypt Packet
 	seq := sess.IncrementSendSeq()
 	encrypted, err := sess.EncryptPacket(wrapped, seq)
@@ -469,10 +541,10 @@ func (s *ServerObfuscatedPacketConn) sendWrapped(p []byte, group uint64, index b
 		return err
 	}
 	PutBuffer2K(wrapped) // Done with plaintext wrapper
-	
+
 	// Add Fake Header
 	finalPkt := AddFakeHeader(encrypted, FakeHeaderRTP)
-	
+
 	if udpAddr, ok := addr.(*net.UDPAddr); ok {
 		n, err := s.conn.WriteToUDP(finalPkt, udpAddr)
 		if err == nil {
@@ -503,13 +575,19 @@ func (s *ServerObfuscatedPacketConn) GetSessionStats() []map[string]interface{} 
 	return s.manager.GetStats()
 }
 
+func (s *ServerObfuscatedPacketConn) GetMetrics() map[string]uint64 {
+	return s.manager.SnapshotMetrics()
+}
+
 func (sm *SessionManager) GetStats() []map[string]interface{} {
 	sm.lock.Lock()
 	defer sm.lock.Unlock()
-	
+
 	var results []map[string]interface{}
 	for _, sess := range sm.sessions {
-		if sess.Token == "" { continue }
+		if sess.Token == "" {
+			continue
+		}
 		r, w := sess.GetAndResetStats()
 		if r > 0 || w > 0 {
 			results = append(results, map[string]interface{}{

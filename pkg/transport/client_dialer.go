@@ -15,10 +15,10 @@ import (
 
 // ClientDialer handles the UDP Handshake and then upgrades to QUIC.
 type ClientDialer struct {
-	ServerAddr *net.UDPAddr
-	ServerPub  []byte
+	ServerAddr  *net.UDPAddr
+	ServerPub   []byte
 	LossPercent int
-	Token      string
+	Token       string
 }
 
 func NewClientDialer(serverAddr string, serverPubHex string, lossPercent int, token string) (*ClientDialer, error) {
@@ -27,18 +27,18 @@ func NewClientDialer(serverAddr string, serverPubHex string, lossPercent int, to
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Decode Pub Key
 	pub, err := hex.DecodeString(serverPubHex)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	return &ClientDialer{
-		ServerAddr: addr,
-		ServerPub:  pub,
+		ServerAddr:  addr,
+		ServerPub:   pub,
 		LossPercent: lossPercent,
-		Token:      token,
+		Token:       token,
 	}, nil
 }
 
@@ -48,7 +48,7 @@ func (d *ClientDialer) Dial(ctx context.Context) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	conn.SetReadBuffer(4 * 1024 * 1024)
 	conn.SetWriteBuffer(4 * 1024 * 1024)
 
@@ -56,21 +56,21 @@ func (d *ClientDialer) Dial(ctx context.Context) (any, error) {
 	priv, _, _ := crypto.GenerateKeyPair()
 	sess := protocol.NewSession(protocol.RoleClient, priv, d.ServerPub)
 	sess.Token = d.Token
-	
+
 	initPacket, err := sess.CreateHandshakeInitiation()
 	if err != nil {
 		conn.Close()
 		return nil, err
 	}
-	
+
 	// Add Fake Header to Init Packet
 	finalInit := AddFakeHeader(initPacket, FakeHeaderRTP)
-	
+
 	if _, err := conn.WriteToUDP(finalInit, d.ServerAddr); err != nil {
 		conn.Close()
 		return nil, err
 	}
-	
+
 	// Read Response
 	buf := make([]byte, 65535)
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
@@ -79,36 +79,36 @@ func (d *ClientDialer) Dial(ctx context.Context) (any, error) {
 		conn.Close()
 		return nil, errors.New("handshake timeout")
 	}
-	
+
 	// Remove Fake Header from Response
 	rawResp := RemoveFakeHeader(buf[:n], FakeHeaderRTP)
 	if len(rawResp) == 0 {
 		conn.Close()
 		return nil, errors.New("invalid handshake response header")
 	}
-	
+
 	if err := sess.ProcessHandshakeResponse(rawResp); err != nil {
 		conn.Close()
 		return nil, err
 	}
-	
+
 	conn.SetReadDeadline(time.Time{})
-	
+
 	logger.Info("Handshake Successful. Upgrading to QUIC...")
-	
+
 	// 3. Wrap Connection with Obfuscation Layer
 	obfsConn := NewObfuscatedPacketConn(conn, sess, d.LossPercent)
-	
+
 	// 4. Dial QUIC
 	tlsConfig := crypto.GenerateTLSConfig()
 	tlsConfig.InsecureSkipVerify = true // Trust the Outer Layer security
 	tlsConfig.NextProtos = []string{"w33d-tunnel"}
-	
+
 	quicConfig := &quic.Config{
-		MaxIdleTimeout: 30 * time.Second,
+		MaxIdleTimeout:  30 * time.Second,
 		KeepAlivePeriod: 10 * time.Second,
 		EnableDatagrams: true,
 	}
-	
+
 	return quic.Dial(ctx, obfsConn, d.ServerAddr, tlsConfig, quicConfig)
 }

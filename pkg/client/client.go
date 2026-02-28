@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -43,15 +44,15 @@ type Config struct {
 }
 
 type Client struct {
-	cfg        Config
-	stats      Stats
-	udpFlows   sync.Map
-	udpAddrs   sync.Map
-	ctx        context.Context
-	cancel     context.CancelFunc
-	quicSess   QUICConnection
-	socksL     net.Listener
-	httpL      net.Listener
+	cfg      Config
+	stats    Stats
+	udpFlows sync.Map
+	udpAddrs sync.Map
+	ctx      context.Context
+	cancel   context.CancelFunc
+	quicSess QUICConnection
+	socksL   net.Listener
+	httpL    net.Listener
 }
 
 type Stats struct {
@@ -74,13 +75,13 @@ func (c *Client) GetStats() Stats {
 
 func (c *Client) Start(ctx context.Context) error {
 	c.ctx, c.cancel = context.WithCancel(ctx)
-	
+
 	// Logger setup (handled by caller)
 
 	// Handle Subscription
 	if c.cfg.SubURL != "" {
 		logger.Info("Fetching subscription from %s", c.cfg.SubURL)
-		
+
 		req, _ := http.NewRequestWithContext(c.ctx, "GET", c.cfg.SubURL, nil)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -178,10 +179,10 @@ func (c *Client) Start(ctx context.Context) error {
 			}()
 		}
 	}
-	
+
 	// Wait for context cancellation
 	<-c.ctx.Done()
-	
+
 	// Cleanup
 	if c.quicSess != nil {
 		c.quicSess.CloseWithError(0, "client stopped")
@@ -189,7 +190,7 @@ func (c *Client) Start(ctx context.Context) error {
 	if c.socksL != nil {
 		c.socksL.Close()
 	}
-	
+
 	logger.Info("Client Stopped.")
 	return nil
 }
@@ -229,19 +230,27 @@ func (c *Client) startSOCKS5Server() {
 
 func (c *Client) handleSocksConnection(conn net.Conn) {
 	defer conn.Close()
-	
-	// Wrap conn to count stats? 
+
+	// Wrap conn to count stats?
 	// Or count in transfer.
-	
+
 	// Handshake
 	buf := make([]byte, 258)
-	if _, err := io.ReadFull(conn, buf[:2]); err != nil { return }
-	if buf[0] != 5 { return }
+	if _, err := io.ReadFull(conn, buf[:2]); err != nil {
+		return
+	}
+	if buf[0] != 5 {
+		return
+	}
 	nMethods := int(buf[1])
-	if _, err := io.ReadFull(conn, buf[:nMethods]); err != nil { return }
+	if _, err := io.ReadFull(conn, buf[:nMethods]); err != nil {
+		return
+	}
 	conn.Write([]byte{5, 0})
 
-	if _, err := io.ReadFull(conn, buf[:4]); err != nil { return }
+	if _, err := io.ReadFull(conn, buf[:4]); err != nil {
+		return
+	}
 	cmd := buf[1]
 
 	if cmd == 3 {
@@ -275,19 +284,29 @@ func (c *Client) handleSocksConnection(conn net.Conn) {
 	var target string
 	switch buf[3] {
 	case 1:
-		if _, err := io.ReadFull(conn, buf[:4]); err != nil { return }
+		if _, err := io.ReadFull(conn, buf[:4]); err != nil {
+			return
+		}
 		target = net.IP(buf[:4]).String()
 	case 3:
-		if _, err := io.ReadFull(conn, buf[:1]); err != nil { return }
+		if _, err := io.ReadFull(conn, buf[:1]); err != nil {
+			return
+		}
 		dLen := int(buf[0])
-		if _, err := io.ReadFull(conn, buf[:dLen]); err != nil { return }
+		if _, err := io.ReadFull(conn, buf[:dLen]); err != nil {
+			return
+		}
 		target = string(buf[:dLen])
 	case 4:
-		if _, err := io.ReadFull(conn, buf[:16]); err != nil { return }
+		if _, err := io.ReadFull(conn, buf[:16]); err != nil {
+			return
+		}
 		target = fmt.Sprintf("[%s]", net.IP(buf[:16]).String())
 	}
 
-	if _, err := io.ReadFull(conn, buf[:2]); err != nil { return }
+	if _, err := io.ReadFull(conn, buf[:2]); err != nil {
+		return
+	}
 	port := int(buf[0])<<8 | int(buf[1])
 	targetAddr := fmt.Sprintf("%s:%d", target, port)
 
@@ -346,7 +365,9 @@ func (c *Client) handleUDPRelay(l *net.UDPConn) {
 		c.udpAddrs.Store(flowID, addr)
 		atomic.AddUint64(&c.stats.BytesTx, uint64(n))
 
-		if n < 4 || buf[2] != 0 { continue }
+		if n < 4 || buf[2] != 0 {
+			continue
+		}
 		// ... SOCKS5 UDP Header Parsing ...
 		// Simplified for brevity, same as before
 		atyp := buf[3]
@@ -355,18 +376,26 @@ func (c *Client) handleUDPRelay(l *net.UDPConn) {
 
 		switch atyp {
 		case 1:
-			if n < pos+6 { continue }
+			if n < pos+6 {
+				continue
+			}
 			target = fmt.Sprintf("%s:%d", net.IP(buf[pos:pos+4]), binary.BigEndian.Uint16(buf[pos+4:pos+6]))
 			pos += 6
 		case 3:
-			if n < pos+1 { continue }
+			if n < pos+1 {
+				continue
+			}
 			dLen := int(buf[pos])
 			pos++
-			if n < pos+dLen+2 { continue }
+			if n < pos+dLen+2 {
+				continue
+			}
 			target = fmt.Sprintf("%s:%d", string(buf[pos:pos+dLen]), binary.BigEndian.Uint16(buf[pos+dLen:pos+dLen+2]))
 			pos += dLen + 2
 		case 4:
-			if n < pos+18 { continue }
+			if n < pos+18 {
+				continue
+			}
 			target = fmt.Sprintf("[%s]:%d", net.IP(buf[pos:pos+16]), binary.BigEndian.Uint16(buf[pos+16:pos+16+2]))
 			pos += 18
 		default:
@@ -393,55 +422,71 @@ func (c *Client) handleDatagrams() {
 		if err != nil {
 			return
 		}
-		
+
 		atomic.AddUint64(&c.stats.BytesRx, uint64(len(data)))
-
-		if len(data) < 5 { continue }
-
-		flowID := binary.BigEndian.Uint32(data[0:4])
-		addrLen := int(data[4])
-		if len(data) < 5+addrLen { continue }
-
-		sourceAddr := string(data[5 : 5+addrLen])
-		payload := data[5+addrLen:]
-
-		val, ok := c.udpFlows.Load(flowID)
-		if !ok { continue }
-		l := val.(*net.UDPConn)
-
-		host, portStr, err := net.SplitHostPort(sourceAddr)
-		if err != nil { continue }
-		port, _ := strconv.Atoi(portStr)
-
-		var header []byte
-		header = append(header, 0, 0, 0)
-
-		ip := net.ParseIP(host)
-		if ip4 := ip.To4(); ip4 != nil {
-			header = append(header, 1)
-			header = append(header, ip4...)
-		} else if ip != nil {
-			header = append(header, 4)
-			header = append(header, ip...)
-		} else {
-			header = append(header, 3)
-			header = append(header, byte(len(host)))
-			header = append(header, []byte(host)...)
-		}
-
-		portBytes := make([]byte, 2)
-		binary.BigEndian.PutUint16(portBytes, uint16(port))
-		header = append(header, portBytes...)
-
-		clientAddrVal, ok := c.udpAddrs.Load(flowID)
-		if !ok {
-			continue
-		}
-		clientAddr := clientAddrVal.(net.Addr)
-
-		fullPkt := append(header, payload...)
-		l.WriteTo(fullPkt, clientAddr)
+		c.routeDatagram(data)
 	}
+}
+
+func (c *Client) routeDatagram(data []byte) error {
+	// Protocol: [FlowID(4)][AddrLen][Addr][Data]
+	if len(data) < 5 {
+		return errors.New("datagram too short")
+	}
+
+	flowID := binary.BigEndian.Uint32(data[0:4])
+	addrLen := int(data[4])
+	if len(data) < 5+addrLen {
+		return errors.New("invalid addr len")
+	}
+
+	sourceAddr := string(data[5 : 5+addrLen])
+	payload := data[5+addrLen:]
+
+	val, ok := c.udpFlows.Load(flowID)
+	if !ok {
+		return errors.New("unknown flow id")
+	}
+	l := val.(*net.UDPConn)
+
+	host, portStr, err := net.SplitHostPort(sourceAddr)
+	if err != nil {
+		return err
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return err
+	}
+
+	var header []byte
+	header = append(header, 0, 0, 0)
+
+	ip := net.ParseIP(host)
+	if ip4 := ip.To4(); ip4 != nil {
+		header = append(header, 1)
+		header = append(header, ip4...)
+	} else if ip != nil {
+		header = append(header, 4)
+		header = append(header, ip...)
+	} else {
+		header = append(header, 3)
+		header = append(header, byte(len(host)))
+		header = append(header, []byte(host)...)
+	}
+
+	portBytes := make([]byte, 2)
+	binary.BigEndian.PutUint16(portBytes, uint16(port))
+	header = append(header, portBytes...)
+
+	clientAddrVal, ok := c.udpAddrs.Load(flowID)
+	if !ok {
+		return errors.New("missing client addr")
+	}
+	clientAddr := clientAddrVal.(net.Addr)
+
+	fullPkt := append(header, payload...)
+	_, err = l.WriteTo(fullPkt, clientAddr)
+	return err
 }
 
 func (c *Client) startHTTPProxy(httpAddr string, socksAddr string) {
@@ -462,14 +507,18 @@ func (c *Client) startHTTPProxy(httpAddr string, socksAddr string) {
 			}
 			w.WriteHeader(http.StatusOK)
 			hijacker, ok := w.(http.Hijacker)
-			if !ok { return }
+			if !ok {
+				return
+			}
 			clientConn, _, err := hijacker.Hijack()
-			if err != nil { return }
+			if err != nil {
+				return
+			}
 			go transfer(destConn, clientConn)
 			go transfer(clientConn, destConn)
 		} else {
 			transport := &http.Transport{
-				Dial: dialer.Dial,
+				Dial:              dialer.Dial,
 				DisableKeepAlives: true,
 			}
 			client := &http.Client{
@@ -503,7 +552,7 @@ func (c *Client) startHTTPProxy(httpAddr string, socksAddr string) {
 			io.Copy(w, resp.Body)
 		}
 	})
-	
+
 	// Create listener manually to close it
 	l, err := net.Listen("tcp", httpAddr)
 	if err != nil {
@@ -511,7 +560,7 @@ func (c *Client) startHTTPProxy(httpAddr string, socksAddr string) {
 		return
 	}
 	c.httpL = l
-	
+
 	go http.Serve(l, handler)
 }
 

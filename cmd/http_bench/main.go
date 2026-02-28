@@ -22,7 +22,7 @@ func main() {
 	fmt.Println("[Setup] Building binaries...")
 	mustRun("go", "build", "-o", "bench_server.exe", "./cmd/server")
 	mustRun("go", "build", "-o", "bench_client.exe", "./cmd/client")
-	
+
 	defer func() {
 		// Cleanup
 		os.Remove("bench_server.exe")
@@ -33,9 +33,11 @@ func main() {
 	fmt.Println("[Setup] Starting Server...")
 	serverCmd := exec.Command("./bench_server.exe", "-port", "2838", "-v")
 	stdoutPipe, err := serverCmd.StdoutPipe()
-	if err != nil { panic(err) }
+	if err != nil {
+		panic(err)
+	}
 	serverCmd.Stderr = os.Stderr
-	
+
 	if err := serverCmd.Start(); err != nil {
 		panic(err)
 	}
@@ -49,21 +51,23 @@ func main() {
 	scanner := bufio.NewScanner(stdoutPipe)
 	var pubKey string
 	keyRegex := regexp.MustCompile(`Static Public Key: ([a-f0-9]+)`)
-	
+
 	go func() {
 		for scanner.Scan() {
 			line := scanner.Text()
-			// fmt.Println("[Server]", line) 
+			// fmt.Println("[Server]", line)
 			if matches := keyRegex.FindStringSubmatch(line); len(matches) > 1 {
 				pubKey = matches[1]
 			}
 		}
 	}()
-	
+
 	// Wait for Key
 	fmt.Println("Waiting for server public key...")
 	for i := 0; i < 50; i++ {
-		if pubKey != "" { break }
+		if pubKey != "" {
+			break
+		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	if pubKey == "" {
@@ -73,7 +77,7 @@ func main() {
 
 	// 3. Start Client
 	fmt.Println("[Setup] Starting Client...")
-	clientCmd := exec.Command("./bench_client.exe", 
+	clientCmd := exec.Command("./bench_client.exe",
 		"-server", "127.0.0.1:2838",
 		"-pubkey", pubKey,
 		"-socks", ":1081", // Use different port than default
@@ -81,7 +85,7 @@ func main() {
 	)
 	clientCmd.Stdout = os.Stdout
 	clientCmd.Stderr = os.Stderr
-	
+
 	if err := clientCmd.Start(); err != nil {
 		panic(err)
 	}
@@ -96,17 +100,17 @@ func main() {
 
 	// 4. Run HTTP Test
 	fmt.Println(">>> Starting HTTP Load Test to gallery.w33d.xyz (Mixed Content) <<<")
-	
+
 	// Setup SOCKS5 Client
 	dialer, err := proxy.SOCKS5("tcp", "127.0.0.1:1081", nil, proxy.Direct)
 	if err != nil {
 		panic(err)
 	}
-	
+
 	httpClient := &http.Client{
 		Transport: &http.Transport{
-			Dial: dialer.Dial,
-			MaxIdleConns: 100,
+			Dial:                dialer.Dial,
+			MaxIdleConns:        100,
 			MaxIdleConnsPerHost: 100,
 		},
 		Timeout: 30 * time.Second,
@@ -124,7 +128,7 @@ func main() {
 	defer cancel()
 
 	concurrency := 20
-	
+
 	// URLs to fetch
 	urls := []string{
 		"http://gallery.w33d.xyz/wall",
@@ -166,7 +170,7 @@ func main() {
 				default:
 					target := urls[idx%len(urls)]
 					idx++
-					
+
 					start := time.Now()
 					// Request
 					resp, err := httpClient.Get(target)
@@ -178,7 +182,7 @@ func main() {
 					// Read Body
 					n, err := io.Copy(io.Discard, resp.Body)
 					resp.Body.Close()
-					
+
 					if err != nil {
 						atomic.AddInt64(&fails, 1)
 					} else if resp.StatusCode != 200 {
@@ -187,7 +191,7 @@ func main() {
 						atomic.AddInt64(&success, 1)
 						atomic.AddInt64(&bytes, n)
 					}
-					
+
 					if time.Since(start) < 50*time.Millisecond {
 						time.Sleep(10 * time.Millisecond)
 					}
@@ -195,7 +199,7 @@ func main() {
 			}
 		}(i)
 	}
-	
+
 	wg.Wait()
 	fmt.Println("Test Completed.")
 }

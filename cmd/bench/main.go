@@ -47,36 +47,36 @@ func (l *LatencyStats) Record(d time.Duration) {
 func (l *LatencyStats) Calculate() (p50, p95, p99 time.Duration, jitter time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	
+
 	if len(l.samples) == 0 {
 		return 0, 0, 0, 0
 	}
-	
+
 	sort.Slice(l.samples, func(i, j int) bool {
 		return l.samples[i] < l.samples[j]
 	})
-	
+
 	n := len(l.samples)
 	p50 = l.samples[n*50/100]
 	p95 = l.samples[n*95/100]
 	p99 = l.samples[n*99/100]
-	
+
 	// Jitter: Standard Deviation
 	var sum float64
 	for _, d := range l.samples {
 		sum += float64(d.Microseconds())
 	}
 	mean := sum / float64(n)
-	
+
 	var sqDiff float64
 	for _, d := range l.samples {
 		diff := float64(d.Microseconds()) - mean
 		sqDiff += diff * diff
 	}
-	
+
 	stdDev := math.Sqrt(sqDiff / float64(n))
 	jitter = time.Duration(stdDev) * time.Microsecond
-	
+
 	return
 }
 
@@ -87,7 +87,7 @@ func main() {
 	socksAddr := flag.String("socks", "127.0.0.1:1080", "SOCKS5 Proxy")
 	dur := flag.Duration("duration", 10*time.Second, "Duration")
 	conc := flag.Int("c", 10, "Concurrency")
-	
+
 	flag.Parse()
 
 	if *mode == "worker" {
@@ -101,14 +101,14 @@ func main() {
 
 func runOrchestrator() {
 	fmt.Println("=== Starting Robustness Benchmark Suite ===")
-	
+
 	// 1. Build Binaries
 	fmt.Println("[Setup] Building binaries...")
 	mustRun("go", "build", "-o", "bench_server.exe", "./cmd/server")
 	mustRun("go", "build", "-o", "bench_client.exe", "./cmd/client")
 	// Build worker (self)
 	mustRun("go", "build", "-o", "bench_worker.exe", "./cmd/bench")
-	
+
 	defer func() {
 		os.Remove("bench_server.exe")
 		os.Remove("bench_client.exe")
@@ -124,7 +124,9 @@ func runOrchestrator() {
 	go func() {
 		for {
 			c, err := echoListener.Accept()
-			if err != nil { return }
+			if err != nil {
+				return
+			}
 			go io.Copy(c, c)
 		}
 	}()
@@ -133,25 +135,27 @@ func runOrchestrator() {
 	// 3. Run Scenarios
 	for _, sc := range scenarios {
 		fmt.Printf("\n>>> Running Scenario: %s (Loss: %d%%) <<<\n", sc.Name, sc.LossPercent)
-		
+
 		// Start Server
 		// Port 2838 + Loss
 		serverCmd := exec.Command("./bench_server.exe", "-port", "2838", "-sim-loss", fmt.Sprintf("%d", sc.LossPercent))
-		
+
 		// Capture Stdout to find Public Key
 		stdoutPipe, err := serverCmd.StdoutPipe()
-		if err != nil { panic(err) }
+		if err != nil {
+			panic(err)
+		}
 		serverCmd.Stderr = os.Stderr
-		
+
 		if err := serverCmd.Start(); err != nil {
 			panic(err)
 		}
-		
+
 		// Scan for Public Key
 		scanner := bufio.NewScanner(stdoutPipe)
 		var pubKey string
 		keyRegex := regexp.MustCompile(`Static Public Key: ([a-f0-9]+)`)
-		
+
 		go func() {
 			for scanner.Scan() {
 				line := scanner.Text()
@@ -161,11 +165,13 @@ func runOrchestrator() {
 				}
 			}
 		}()
-		
+
 		// Wait for Server Port (Sleep for UDP)
 		// Also wait for key
 		for i := 0; i < 20; i++ {
-			if pubKey != "" { break }
+			if pubKey != "" {
+				break
+			}
 			time.Sleep(100 * time.Millisecond)
 		}
 		if pubKey == "" {
@@ -173,9 +179,9 @@ func runOrchestrator() {
 			serverCmd.Process.Kill()
 			continue
 		}
-		
+
 		// Start Client
-		clientCmd := exec.Command("./bench_client.exe", 
+		clientCmd := exec.Command("./bench_client.exe",
 			"-server", "127.0.0.1:2838",
 			"-pubkey", pubKey,
 			"-socks", ":1080",
@@ -187,7 +193,7 @@ func runOrchestrator() {
 			serverCmd.Process.Kill()
 			panic(err)
 		}
-		
+
 		// Wait for SOCKS Port
 		if err := waitForPort("127.0.0.1:1080", 15*time.Second); err != nil {
 			fmt.Printf("Client failed to start: %v\n", err)
@@ -195,9 +201,9 @@ func runOrchestrator() {
 			serverCmd.Process.Kill()
 			continue
 		}
-		
+
 		// Run Worker
-		workerCmd := exec.Command("./bench_worker.exe", 
+		workerCmd := exec.Command("./bench_worker.exe",
 			"-mode", "worker",
 			"-target", "127.0.0.1:9999",
 			"-socks", "127.0.0.1:1080",
@@ -207,13 +213,13 @@ func runOrchestrator() {
 		workerCmd.Stdout = os.Stdout
 		workerCmd.Stderr = os.Stderr
 		workerCmd.Run()
-		
+
 		// Cleanup
 		clientCmd.Process.Kill()
 		serverCmd.Process.Kill()
 		time.Sleep(1 * time.Second) // Cooldown
 	}
-	
+
 	fmt.Println("\n=== Benchmark Suite Completed ===")
 }
 
@@ -248,7 +254,7 @@ func waitForPort(addr string, timeout time.Duration) error {
 		// 3. Start SOCKS
 		// So if SOCKS port is open, it means Handshake + QUIC is done.
 		// So checking 1080 is sufficient for Client readiness.
-		
+
 		// For Server, we just wait a bit or assume it's fast.
 		// Since we check SOCKS, and Client depends on Server, SOCKS check implicitly checks Server.
 		time.Sleep(100 * time.Millisecond)
@@ -276,7 +282,7 @@ func runWorker(targetAddr, socksAddr string, duration time.Duration, concurrency
 	go func() {
 		ticker := time.NewTicker(1 * time.Second)
 		defer ticker.Stop()
-		
+
 		lastBytes := int64(0)
 		for {
 			select {
@@ -286,7 +292,7 @@ func runWorker(targetAddr, socksAddr string, duration time.Duration, concurrency
 				curBytes := atomic.LoadInt64(&totalBytes)
 				diff := curBytes - lastBytes
 				lastBytes = curBytes
-				
+
 				mbps := float64(diff) * 8 / 1024 / 1024
 				fmt.Printf("[Status] Throughput: %.2f Mbps | Requests: %d | Fails: %d\n", mbps, atomic.LoadInt64(&success), atomic.LoadInt64(&failures))
 			}
@@ -297,7 +303,7 @@ func runWorker(targetAddr, socksAddr string, duration time.Duration, concurrency
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			
+
 			// Create SOCKS5 Dialer
 			dialer, err := proxy.SOCKS5("tcp", socksAddr, nil, proxy.Direct)
 			if err != nil {
@@ -323,21 +329,21 @@ func runWorker(targetAddr, socksAddr string, duration time.Duration, concurrency
 					return
 				default:
 					reqStart := time.Now()
-					
+
 					// Write
 					n, err := conn.Write(buf)
 					if err != nil {
 						atomic.AddInt64(&failures, 1)
 						return
 					}
-					
+
 					// Read
 					_, err = io.ReadFull(conn, buf[:n])
 					if err != nil {
 						atomic.AddInt64(&failures, 1)
 						return
 					}
-					
+
 					latencies.Record(time.Since(reqStart))
 					atomic.AddInt64(&totalBytes, int64(n))
 					atomic.AddInt64(&success, 1)
@@ -348,10 +354,10 @@ func runWorker(targetAddr, socksAddr string, duration time.Duration, concurrency
 
 	wg.Wait()
 	elapsed := time.Since(start).Seconds()
-	
+
 	mbps := (float64(totalBytes) * 8 / 1024 / 1024) / elapsed
 	p50, p95, p99, jitter := latencies.Calculate()
-	
+
 	fmt.Printf("--- Results ---\n")
 	fmt.Printf("Total Data: %.2f MB\n", float64(totalBytes)/1024/1024)
 	fmt.Printf("Throughput: %.2f Mbps\n", mbps)

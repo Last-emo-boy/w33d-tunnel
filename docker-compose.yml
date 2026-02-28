@@ -11,6 +11,18 @@ services:
       - ./data:/root/data
     restart: always
 
+  server:
+    build:
+      context: .
+      dockerfile: docker/server/Dockerfile
+    command: ["./server", "-port", "8080", "-manager", "http://manager:2933", "-node-id", "local-node-1"]
+    ports:
+      - "8080:8080/udp"
+      - "8090:8090"
+    depends_on:
+      - manager
+    restart: always
+
   web:
     build:
       context: ./web
@@ -19,4 +31,5 @@ services:
       - "7729:7729"
     depends_on:
       - manager
+      - server
     restart: always

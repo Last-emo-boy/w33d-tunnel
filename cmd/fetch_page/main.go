@@ -12,10 +12,10 @@ func main() {
 		panic(err)
 	}
 	defer resp.Body.Close()
-	
+
 	body, _ := io.ReadAll(resp.Body)
 	content := string(body)
-	
+
 	// Find images pointing to oss.w33d.xyz
 	// Example: src="https://oss.w33d.xyz/..."
 	// The content might be JS-generated or simply not matching regex.

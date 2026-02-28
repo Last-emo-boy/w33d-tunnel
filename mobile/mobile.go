@@ -11,8 +11,8 @@ import (
 
 // MobileClient wraps the internal client for gomobile
 type MobileClient struct {
-	c      *client.Client
-	cancel context.CancelFunc
+	c       *client.Client
+	cancel  context.CancelFunc
 	tunFile *os.File
 }
 
@@ -28,7 +28,7 @@ func NewMobileClient() *MobileClient {
 func (m *MobileClient) StartTun(fd int) {
 	file := os.NewFile(uintptr(fd), "tun")
 	m.tunFile = file
-	
+
 	go func() {
 		buf := make([]byte, 1500)
 		for {
@@ -101,7 +101,7 @@ func (m *MobileClient) GetStats() string {
 		return `{"bytes_tx": 0, "bytes_rx": 0}`
 	}
 	stats := m.c.GetStats()
-	
+
 	res := map[string]uint64{
 		"bytes_tx": stats.BytesTx,
 		"bytes_rx": stats.BytesRx,

@@ -34,7 +34,7 @@ func main() {
 	globalProxy := a.Preferences().BoolWithFallback(prefGlobalProxy, false)
 
 	// --- UI Components ---
-	
+
 	// Bindings
 	subUrlBind := binding.BindString(&subURL)
 	socksAddrBind := binding.BindString(&socksAddr)
@@ -50,16 +50,16 @@ func main() {
 	// Connection Status
 	statusLabel := widget.NewLabel("Status: Disconnected")
 	statusLabel.TextStyle = fyne.TextStyle{Bold: true}
-	
+
 	statusIcon := widget.NewIcon(theme.MediaRecordIcon()) // Red/Green circle logic needed
-	
+
 	// Inputs
 	subUrlEntry := widget.NewEntryWithData(subUrlBind)
 	subUrlEntry.SetPlaceHolder("https://cloud.w33d.xyz/api/subscribe?token=...")
-	
+
 	socksAddrEntry := widget.NewEntryWithData(socksAddrBind)
 	socksAddrEntry.SetPlaceHolder(":1080")
-	
+
 	globalProxyCheck := widget.NewCheckWithData("Global System Proxy", globalProxyBind)
 
 	// Stats
@@ -76,7 +76,7 @@ func main() {
 	// Redirect Logger
 	logger.SetOutputCallback(func(msg string) {
 		// Append log on main thread to be safe
-		// But Fyne widgets are not thread safe? 
+		// But Fyne widgets are not thread safe?
 		// Actually SetText triggers refresh which should be on UI thread?
 		// Better use binding or window.Canvas().Refresh()?
 		// Let's use simple append for now, but trim to avoid memory leak
@@ -85,13 +85,13 @@ func main() {
 			currentText = currentText[len(currentText)-8000:]
 		}
 		logEntry.SetText(currentText + msg + "\n")
-		logEntry.CursorRow = len(logEntry.Text) 
+		logEntry.CursorRow = len(logEntry.Text)
 	})
 
 	// Client Instance
 	var cancelClient context.CancelFunc
 	var isConnected bool
-	
+
 	connectBtn := widget.NewButton("Connect", nil)
 	connectBtn.Importance = widget.HighImportance
 
@@ -150,7 +150,7 @@ func main() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		cancelClient = cancel
-		
+
 		c := client.NewClient(cfg)
 		// currentClient = c // Unused for now
 
@@ -176,15 +176,15 @@ func main() {
 			connectBtn.Enable()
 
 			err := c.Start(ctx)
-			
+
 			// Cleanup
 			ticker.Stop()
 			statsDone <- true
-			
+
 			if err != nil && err != context.Canceled {
 				statusLabel.SetText(fmt.Sprintf("Error: %v", err))
 			}
-			
+
 			updateUI(false)
 			connectBtn.Enable()
 		}()
@@ -213,7 +213,7 @@ func main() {
 
 	w.SetContent(container.NewBorder(header, nil, nil, nil, tabs))
 	w.Resize(fyne.NewSize(450, 600))
-	
+
 	// System Tray
 	if desk, ok := a.(desktop.App); ok {
 		m := fyne.NewMenu("w33d-tunnel",
@@ -233,7 +233,7 @@ func main() {
 		)
 		desk.SetSystemTrayMenu(m)
 	}
-	
+
 	// Handle Close to Tray (Optional, for now just quit)
 	w.SetCloseIntercept(func() {
 		// Ideally minimize to tray, but let's just close app and clean up proxies

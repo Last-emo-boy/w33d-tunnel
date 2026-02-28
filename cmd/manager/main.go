@@ -1,11 +1,14 @@
 package main
 
 import (
+	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/glebarez/sqlite"
@@ -14,34 +17,78 @@ import (
 
 // Models
 type User struct {
-	ID        uint      `gorm:"primaryKey" json:"id"`
-	Username  string    `gorm:"unique" json:"username"`
-	Token     string    `gorm:"unique;index" json:"token"`
-	CreatedAt time.Time `json:"created_at"`
-	QuotaBytes int64    `json:"quota_bytes"`
-	UsedBytes  int64    `json:"used_bytes"`
-	BandwidthLimit int64 `json:"bandwidth_limit"` // Bytes/s
+	ID             uint      `gorm:"primaryKey" json:"id"`
+	Username       string    `gorm:"unique" json:"username"`
+	Token          string    `gorm:"unique;index" json:"token"`
+	CreatedAt      time.Time `json:"created_at"`
+	QuotaBytes     int64     `json:"quota_bytes"`
+	UsedBytes      int64     `json:"used_bytes"`
+	BandwidthLimit int64     `json:"bandwidth_limit"` // Bytes/s
 }
 
 type Node struct {
-	ID        string    `gorm:"primaryKey" json:"id"`
-	Name      string    `json:"name"`
-	Addr      string    `json:"addr"` // host:port
-	PubKey    string    `json:"pub_key"`
-	LastSeen  time.Time `json:"last_seen"`
+	ID       string    `gorm:"primaryKey" json:"id"`
+	Name     string    `json:"name"`
+	Addr     string    `json:"addr"` // host:port
+	PubKey   string    `json:"pub_key"`
+	LastSeen time.Time `json:"last_seen"`
 }
 
 type TrafficLog struct {
-	ID        uint      `gorm:"primaryKey"`
-	NodeID    string    `json:"node_id"`
-	UserToken string    `index" json:"user_token"`
-	BytesRead uint64    `json:"bytes_read"`
-	BytesWritten uint64 `json:"bytes_written"`
-	Timestamp time.Time `index" json:"timestamp"`
+	ID           uint      `gorm:"primaryKey"`
+	NodeID       string    `json:"node_id"`
+	UserToken    string    `gorm:"index" json:"user_token"`
+	BytesRead    uint64    `json:"bytes_read"`
+	BytesWritten uint64    `json:"bytes_written"`
+	Timestamp    time.Time `gorm:"index" json:"timestamp"`
 }
 
 // Global DB
 var db *gorm.DB
+var nodeSecrets []string
+
+func parseBoolEnv(v string) bool {
+	s := strings.ToLower(strings.TrimSpace(v))
+	return s == "1" || s == "true" || s == "yes" || s == "on"
+}
+
+func parseSecretList(raw string) []string {
+	parts := strings.Split(raw, ",")
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		secret := strings.TrimSpace(p)
+		if secret == "" {
+			continue
+		}
+		if _, ok := seen[secret]; ok {
+			continue
+		}
+		seen[secret] = struct{}{}
+		out = append(out, secret)
+	}
+	return out
+}
+
+func secretInList(secret string, allowed []string) bool {
+	if strings.TrimSpace(secret) == "" || len(allowed) == 0 {
+		return false
+	}
+	matched := 0
+	for _, s := range allowed {
+		if subtle.ConstantTimeCompare([]byte(secret), []byte(s)) == 1 {
+			matched = 1
+		}
+	}
+	return matched == 1
+}
+
+func validateManagerAuthConfig(nodeSecrets []string, strict bool) error {
+	if strict && len(nodeSecrets) == 0 {
+		return errors.New("MANAGER_STRICT_AUTH is enabled but MANAGER_NODE_SECRET is empty")
+	}
+	return nil
+}
 
 func main() {
 	var err error
@@ -55,13 +102,31 @@ func main() {
 	// Migrate
 	db.AutoMigrate(&User{}, &Node{}, &TrafficLog{})
 
+	nodeSecrets = parseSecretList(os.Getenv("MANAGER_NODE_SECRET"))
+	strictAuth := parseBoolEnv(os.Getenv("MANAGER_STRICT_AUTH"))
+	if err := validateManagerAuthConfig(nodeSecrets, strictAuth); err != nil {
+		fmt.Println("Auth config error:", err)
+		os.Exit(1)
+	}
+	if len(nodeSecrets) > 0 {
+		fmt.Println("Node API auth: enabled via MANAGER_NODE_SECRET")
+		if len(nodeSecrets) > 1 {
+			fmt.Printf("Node API auth rotation window: %d active secrets\n", len(nodeSecrets))
+		}
+	} else {
+		fmt.Println("Node API auth: disabled (MANAGER_NODE_SECRET is empty)")
+	}
+	if strictAuth {
+		fmt.Println("Strict auth mode: enabled")
+	}
+
 	// Seed Dummy User
 	var count int64
 	db.Model(&User{}).Count(&count)
 	if count == 0 {
 		db.Create(&User{
-			Username: "admin",
-			Token:    "admin-token-123",
+			Username:   "admin",
+			Token:      "admin-token-123",
 			QuotaBytes: 10 * 1024 * 1024 * 1024, // 10GB
 		})
 		fmt.Println("Created default user: admin / admin-token-123")
@@ -81,19 +146,36 @@ func main() {
 	}
 
 	// Routes
-	http.HandleFunc("/api/report", corsHandler(handleReport))
+	http.HandleFunc("/api/report", corsHandler(requireNodeAuth(handleReport)))
 	http.HandleFunc("/api/subscribe", corsHandler(handleSubscribe))
-	http.HandleFunc("/api/sync_users", corsHandler(handleSyncUsers)) // For Server
+	http.HandleFunc("/api/sync_users", corsHandler(requireNodeAuth(handleSyncUsers))) // For Server
 	http.HandleFunc("/api/nodes", corsHandler(handleNodes))
 	http.HandleFunc("/api/stats", corsHandler(handleStats))
-	http.HandleFunc("/api/register_node", corsHandler(handleRegisterNode))
-	
+	http.HandleFunc("/api/register_node", corsHandler(requireNodeAuth(handleRegisterNode)))
+
 	// Admin Routes
 	http.HandleFunc("/api/admin/users", corsHandler(handleAdminUsers))
 	http.HandleFunc("/api/admin/login", corsHandler(handleAdminLogin))
 
 	fmt.Println("Manager listening on :2933")
 	http.ListenAndServe(":2933", nil)
+}
+
+func requireNodeAuth(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if len(nodeSecrets) == 0 {
+			h(w, r)
+			return
+		}
+
+		secret := r.Header.Get("X-Node-Secret")
+		if !secretInList(secret, nodeSecrets) {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		h(w, r)
+	}
 }
 
 // Handlers
@@ -145,10 +227,10 @@ func handleReport(w http.ResponseWriter, r *http.Request) {
 		})
 		usageMap[s.Token] += int64(s.Read + s.Write)
 	}
-	
+
 	if len(logs) > 0 {
 		db.Create(&logs)
-		
+
 		// Update Users
 		for token, usage := range usageMap {
 			db.Model(&User{}).Where("token = ?", token).Update("used_bytes", gorm.Expr("used_bytes + ?", usage))
@@ -163,24 +245,24 @@ func handleSyncUsers(w http.ResponseWriter, r *http.Request) {
 	// TODO: Auth check (Node Secret?)
 	var users []User
 	db.Find(&users)
-	
+
 	type UserSync struct {
-		Token     string `json:"token"`
-		QuotaBytes int64  `json:"quota_bytes"`
-		UsedBytes  int64  `json:"used_bytes"`
-		BandwidthLimit int64 `json:"bandwidth_limit"`
+		Token          string `json:"token"`
+		QuotaBytes     int64  `json:"quota_bytes"`
+		UsedBytes      int64  `json:"used_bytes"`
+		BandwidthLimit int64  `json:"bandwidth_limit"`
 	}
-	
+
 	res := []UserSync{}
 	for _, u := range users {
 		res = append(res, UserSync{
-			Token:      u.Token,
-			QuotaBytes: u.QuotaBytes,
-			UsedBytes:  u.UsedBytes,
+			Token:          u.Token,
+			QuotaBytes:     u.QuotaBytes,
+			UsedBytes:      u.UsedBytes,
 			BandwidthLimit: u.BandwidthLimit,
 		})
 	}
-	
+
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -197,14 +279,14 @@ func handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		Token string `json:"token"`
 	}
 	json.NewDecoder(r.Body).Decode(&payload)
-	
+
 	// Simple check: Is this the admin user?
 	var user User
 	if err := db.First(&user, "token = ? AND username = 'admin'", payload.Token).Error; err != nil {
 		http.Error(w, "Invalid admin token", 401)
 		return
 	}
-	
+
 	w.WriteHeader(200)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
@@ -224,21 +306,21 @@ func handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(users)
 		return
 	}
-	
+
 	if r.Method == "POST" {
 		var payload struct {
-			Username string `json:"username"`
-			QuotaGB  int64  `json:"quota_gb"`
-			BandwidthLimit int64 `json:"bandwidth_limit"`
+			Username       string `json:"username"`
+			QuotaGB        int64  `json:"quota_gb"`
+			BandwidthLimit int64  `json:"bandwidth_limit"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			http.Error(w, err.Error(), 400)
 			return
 		}
-		
+
 		// Generate Token
 		token := fmt.Sprintf("u-%d-%s", time.Now().Unix(), randString(8))
-		
+
 		user := User{
 			Username:       payload.Username,
 			Token:          token,
@@ -246,12 +328,12 @@ func handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 			QuotaBytes:     payload.QuotaGB * 1024 * 1024 * 1024,
 			BandwidthLimit: payload.BandwidthLimit,
 		}
-		
+
 		if err := db.Create(&user).Error; err != nil {
 			http.Error(w, "Failed to create user (duplicate?)", 400)
 			return
 		}
-		
+
 		json.NewEncoder(w).Encode(user)
 		return
 	}
@@ -313,19 +395,19 @@ func handleRegisterNode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", 405)
 		return
 	}
-	
+
 	var payload struct {
 		ID     string `json:"id"`
 		Name   string `json:"name"`
 		Addr   string `json:"addr"`
 		PubKey string `json:"pub_key"`
 	}
-	
+
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		http.Error(w, err.Error(), 400)
 		return
 	}
-	
+
 	// Upsert Node
 	var node Node
 	if result := db.First(&node, "id = ?", payload.ID); result.Error != nil {
@@ -344,7 +426,7 @@ func handleRegisterNode(w http.ResponseWriter, r *http.Request) {
 			"LastSeen": time.Now(),
 		})
 	}
-	
+
 	w.WriteHeader(200)
 }
 
@@ -368,7 +450,7 @@ func handleSubscribe(w http.ResponseWriter, r *http.Request) {
 	// Format as JSON or specialized config
 	// Let's return JSON for our frontend/client
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"user": user,
+		"user":  user,
 		"nodes": nodes,
 	})
 }
@@ -397,9 +479,9 @@ func handleStats(w http.ResponseWriter, r *http.Request) {
 	var res Result
 	db.Model(&TrafficLog{}).Where("user_token = ?", token).
 		Select("sum(bytes_read) as r, sum(bytes_written) as w").Scan(&res)
-		
+
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"bytes_read": res.R,
+		"bytes_read":    res.R,
 		"bytes_written": res.W,
 	})
 }

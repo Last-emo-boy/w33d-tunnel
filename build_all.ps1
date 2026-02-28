@@ -1,37 +1,24 @@
-# Build Script for Multi-Platform Binaries
+# Build all CLI binaries for common target platforms.
+
+$ErrorActionPreference = "Stop"
 
 $platforms = @(
-    @{ OS = "windows"; Arch = "amd64"; Ext = ".exe" },
-    @{ OS = "linux";   Arch = "amd64"; Ext = "" },
-    @{ OS = "linux";   Arch = "arm64"; Ext = "" },
-    @{ OS = "darwin";  Arch = "amd64"; Ext = "" },
-    @{ OS = "darwin";  Arch = "arm64"; Ext = "" }
+    @{ OS = "windows"; Arch = "amd64" },
+    @{ OS = "windows"; Arch = "arm64" },
+    @{ OS = "linux";   Arch = "amd64" },
+    @{ OS = "linux";   Arch = "arm64" },
+    @{ OS = "darwin";  Arch = "amd64" },
+    @{ OS = "darwin";  Arch = "arm64" }
 )
-
-$outputDir = "dist"
-if (!(Test-Path -Path $outputDir)) {
-    New-Item -ItemType Directory -Path $outputDir | Out-Null
-}
 
 foreach ($p in $platforms) {
     $env:GOOS = $p.OS
     $env:GOARCH = $p.Arch
-    $ext = $p.Ext
-    
-    $clientName = "$outputDir/client-$($p.OS)-$($p.Arch)$ext"
-    $serverName = "$outputDir/server-$($p.OS)-$($p.Arch)$ext"
-
     Write-Host "Building for $($p.OS)/$($p.Arch)..."
-    
-    go build -o $clientName ./cmd/client
-    if ($LASTEXITCODE -ne 0) { Write-Error "Build failed for client $($p.OS)"; continue }
-    
-    go build -o $serverName ./cmd/server
-    if ($LASTEXITCODE -ne 0) { Write-Error "Build failed for server $($p.OS)"; continue }
+    & .\tools\build_binaries.ps1 "dist"
 }
 
-Write-Host "Build complete. Artifacts in $outputDir"
-
-# Reset env vars
 $env:GOOS = ""
 $env:GOARCH = ""
+
+Write-Host "Build complete. Artifacts in dist"

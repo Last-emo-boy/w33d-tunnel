@@ -12,9 +12,21 @@ dist/
 
 # Project specific
 Secure Censorship-Resistant UDP Tunnel.txt
-TODO.md
 
 # Editor
 .vscode/
 .idea/
 /.trae
+
+# Iteration planning docs
+spec/
+TODO.md
+task.md
+tasks.md
+TASK.md
+TASKS.md
+progress.md
+
+# Local Go caches
+.gocache/
+.gocache_*/
