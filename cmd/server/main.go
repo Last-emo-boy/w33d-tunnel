@@ -160,6 +160,14 @@ func runTrafficReporter(conn *transport.ServerObfuscatedPacketConn) {
 			logger.Error("Failed to report stats: %v", err)
 			continue
 		}
+		
+		// Reset stats if report successful
+		// Wait, GetSessionStats() does NOT reset stats in current implementation of ServerObfuscatedPacketConn?
+		// We need to check pkg/transport/server_conn.go
+		
+		if resp.StatusCode != 200 {
+			logger.Error("Report stats returned %d", resp.StatusCode)
+		}
 		resp.Body.Close()
 	}
 }

@@ -156,6 +156,7 @@ func handleReport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(200)
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 func handleSyncUsers(w http.ResponseWriter, r *http.Request) {
@@ -180,6 +181,8 @@ func handleSyncUsers(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"users": res,
 	})
