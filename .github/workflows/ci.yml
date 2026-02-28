@@ -26,5 +26,12 @@ jobs:
     - name: Core Test Profile
       run: bash ./tools/test_core.sh
 
-    - name: Vet
-      run: go vet ./...
+    - name: Vet (Core/Headless)
+      run: |
+        go vet ./pkg/... \
+          ./cmd/server \
+          ./cmd/manager \
+          ./cmd/client \
+          ./cmd/bench \
+          ./cmd/http_bench \
+          ./cmd/fetch_page
